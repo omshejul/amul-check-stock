@@ -108,6 +108,12 @@ The `API_KEY` is required for authentication on all API endpoints (except `/heal
 **PostHog Analytics (Optional):**  
 PostHog is completely optional and will not affect the service if not configured. When enabled, it tracks comprehensive events across the entire application lifecycle.
 
+**Features:**
+- ✨ **Immediate event delivery** - Events are sent immediately (no batching delay)
+- 🔥 **Exception autocapture** - Automatically captures and reports uncaught exceptions
+- 🛡️ **Express error integration** - Captures Express errors that would otherwise be missed
+- 📊 **Manual exception tracking** - All caught errors are reported with context
+
 **Server Lifecycle:**
 - `server_started` - when the server starts up (includes port, Node version)
 - `server_shutdown` - when the server shuts down gracefully (includes signal type)

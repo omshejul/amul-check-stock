@@ -1,4 +1,5 @@
 const express = require('express');
+const { setupExpressErrorHandler } = require('posthog-node');
 const { server: serverConfig, posthog: posthogConfig } = require('./config');
 const {
   initExistingMonitors,
@@ -6,7 +7,7 @@ const {
   deleteSubscription,
   getSubscriptionsByEmail
 } = require('./monitorManager');
-const { initPostHog, track, shutdown: shutdownPostHog } = require('./analytics');
+const { initPostHog, track, captureException, shutdown: shutdownPostHog, getClient } = require('./analytics');
 
 const app = express();
 
@@ -123,8 +124,15 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
     });
   } catch (error) {
     console.error('Failed to create subscription:', error);
-
-    // Track error in PostHog
+    
+    // Capture exception in PostHog
+    captureException(error, email || 'unknown', {
+      context: 'subscription_creation',
+      productUrl,
+      deliveryPincode
+    });
+    
+    // Track error event in PostHog
     track({
       distinctId: email || 'unknown',
       event: 'subscription_creation_failed',
@@ -203,6 +211,13 @@ app.delete('/checks/:subscriptionId', authenticateApiKey, (req, res) => {
 function startServer() {
   // Initialize PostHog (optional)
   initPostHog(posthogConfig);
+
+  // Setup Express error handler for PostHog exception autocapture
+  const posthogClient = getClient();
+  if (posthogClient) {
+    setupExpressErrorHandler(posthogClient, app);
+    console.log('📊 PostHog: Express error handler configured');
+  }
 
   // Track server startup
   track({
