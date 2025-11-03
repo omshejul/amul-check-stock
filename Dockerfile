@@ -8,7 +8,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     build-essential \
     python3 \
     pkg-config \
-    su-exec \
+    gosu \
     chromium \
     libasound2 \
     libx11-xcb1 \

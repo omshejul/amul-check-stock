@@ -8,5 +8,5 @@ if [ -d "/app/data" ]; then
 fi
 
 # Switch to node user and execute the main command
-exec su-exec node "$@"
+exec gosu node "$@"
 
