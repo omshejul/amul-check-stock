@@ -1,6 +1,7 @@
 const db = require('./db');
 const { checkProductStock } = require('./stockChecker');
 const { sendNotification } = require('./notification');
+const { track } = require('./analytics');
 
 const COLORS = {
   green: '\x1b[32m',
@@ -117,6 +118,33 @@ async function runProductCheck(productId) {
     const previousStatus = monitor.lastStatus;
     monitor.lastStatus = result.stockStatus;
 
+    // Track stock status changes
+    if (previousStatus && previousStatus !== result.stockStatus) {
+      track({
+        distinctId: `product_${productId}`,
+        event: 'stock_status_changed',
+        properties: {
+          productId,
+          productUrl: product.url,
+          deliveryPincode: product.delivery_pincode,
+          previousStatus,
+          newStatus: result.stockStatus,
+          isAvailable: result.isAvailable
+        }
+      });
+    }
+
+    // Track stock check completed
+    track({
+      distinctId: `product_${productId}`,
+      event: 'stock_check_completed',
+      properties: {
+        productId,
+        stockStatus: result.stockStatus,
+        isAvailable: result.isAvailable
+      }
+    });
+
     if (result.isAvailable) {
       const subscriptions = selectActiveSubscriptionsByProductStmt.all(productId);
 
@@ -135,8 +163,43 @@ async function runProductCheck(productId) {
           updateSubscriptionStatusStmt.run({ id: subscription.id, status: 'expired' });
           expiredCount += 1;
           log('green', `Notification dispatched to ${subscription.email} (${subscription.phone_number}) - subscription expired.`);
+
+          // Track successful stock notification in PostHog
+          track({
+            distinctId: subscription.email,
+            event: 'stock_available_notification_sent',
+            properties: {
+              productId,
+              subscriptionId: subscription.id,
+              productUrl: product.url,
+              deliveryPincode: product.delivery_pincode,
+              stockStatus: result.stockStatus
+            }
+          });
+
+          // Track subscription expired
+          track({
+            distinctId: subscription.email,
+            event: 'subscription_expired',
+            properties: {
+              productId,
+              subscriptionId: subscription.id,
+              reason: 'stock_became_available'
+            }
+          });
         } catch (error) {
           log('red', `Failed to send notification to ${subscription.email} (${subscription.phone_number}): ${error.message}`);
+
+          // Track failed notification in PostHog
+          track({
+            distinctId: subscription.email,
+            event: 'stock_notification_failed',
+            properties: {
+              productId,
+              subscriptionId: subscription.id,
+              error: error.message
+            }
+          });
         }
       }
 
@@ -152,6 +215,17 @@ async function runProductCheck(productId) {
     }
   } catch (error) {
     log('red', `Error monitoring product ${productId}: ${error.message}`);
+
+    // Track stock check errors in PostHog
+    track({
+      distinctId: `product_${productId}`,
+      event: 'stock_check_error',
+      properties: {
+        productId,
+        error: error.message,
+        productUrl: product?.url
+      }
+    });
   } finally {
     monitor.isChecking = false;
   }
@@ -159,11 +233,36 @@ async function runProductCheck(productId) {
 
 function startMonitor(product) {
   if (monitors.has(product.id)) {
+    // Track monitor reuse
+    track({
+      distinctId: `product_${product.id}`,
+      event: 'monitor_reused',
+      properties: {
+        productId: product.id,
+        productUrl: product.url,
+        deliveryPincode: product.delivery_pincode,
+        intervalMinutes: product.interval_minutes
+      }
+    });
+
     return monitors.get(product.id);
   }
 
   const intervalMs = getIntervalMs(product.interval_minutes);
   log('blue', `Starting monitor for product ${product.id} (${product.url}) every ${product.interval_minutes} minute(s).`);
+
+  // Track monitor start
+  track({
+    distinctId: `product_${product.id}`,
+    event: 'monitor_started',
+    properties: {
+      productId: product.id,
+      productUrl: product.url,
+      deliveryPincode: product.delivery_pincode,
+      intervalMinutes: product.interval_minutes,
+      intervalMs
+    }
+  });
 
   const monitor = {
     timer: setInterval(() => {
@@ -177,6 +276,17 @@ function startMonitor(product) {
 
   runProductCheck(product.id).catch((error) => {
     log('red', `Initial check failed for product ${product.id}: ${error.message}`);
+
+    // Track initial check failures in PostHog
+    track({
+      distinctId: `product_${product.id}`,
+      event: 'initial_stock_check_failed',
+      properties: {
+        productId: product.id,
+        productUrl: product.url,
+        error: error.message
+      }
+    });
   });
 
   return monitor;
@@ -188,11 +298,32 @@ function stopMonitor(productId) {
     clearInterval(monitor.timer);
     monitors.delete(productId);
     log('blue', `Stopped monitor for product ${productId}.`);
+
+    // Track monitor stop
+    track({
+      distinctId: `product_${productId}`,
+      event: 'monitor_stopped',
+      properties: {
+        productId,
+        reason: 'no_active_subscriptions'
+      }
+    });
   }
 }
 
 function initExistingMonitors() {
   const products = selectProductsWithActiveSubscriptionsStmt.all();
+
+  // Track monitor initialization
+  track({
+    distinctId: 'system',
+    event: 'monitors_initialized',
+    properties: {
+      monitorCount: products.length,
+      timestamp: new Date().toISOString()
+    }
+  });
+
   products.forEach((product) => startMonitor(product));
 }
 
@@ -208,6 +339,17 @@ async function addSubscription({ productUrl, deliveryPincode, intervalMinutes = 
     delivery_pincode: deliveryPincode,
     interval_minutes: interval
   };
+
+  // Check if product already exists
+  const existingProduct = selectProductStmt.get(productUrl, deliveryPincode, interval);
+  const isNewProduct = !existingProduct;
+
+  // Check if subscription already exists
+  let existingSubscription = null;
+  if (existingProduct) {
+    existingSubscription = selectSubscriptionStmt.get(existingProduct.id, email);
+  }
+  const isReactivation = existingSubscription && existingSubscription.status !== 'active';
 
   const transaction = db.transaction(() => {
     insertProductStmt.run(productPayload);
@@ -228,6 +370,44 @@ async function addSubscription({ productUrl, deliveryPincode, intervalMinutes = 
 
   const { product, subscription } = transaction();
 
+  // Track product creation or reuse
+  if (isNewProduct) {
+    track({
+      distinctId: email,
+      event: 'product_created',
+      properties: {
+        productId: product.id,
+        productUrl,
+        deliveryPincode,
+        intervalMinutes: interval
+      }
+    });
+  } else {
+    track({
+      distinctId: email,
+      event: 'product_reused',
+      properties: {
+        productId: product.id,
+        productUrl,
+        deliveryPincode,
+        intervalMinutes: interval
+      }
+    });
+  }
+
+  // Track subscription reactivation
+  if (isReactivation) {
+    track({
+      distinctId: email,
+      event: 'subscription_reactivated',
+      properties: {
+        subscriptionId: subscription.id,
+        productId: product.id,
+        previousStatus: existingSubscription.status
+      }
+    });
+  }
+
   startMonitor(product);
 
   const confirmationMessage = `✅ Subscription active!\n\nProduct: ${product.url}\nPincode: ${product.delivery_pincode}\nFrequency: every ${product.interval_minutes} minute(s)\n\nYou'll receive an alert as soon as stock is available.`;
@@ -235,8 +415,29 @@ async function addSubscription({ productUrl, deliveryPincode, intervalMinutes = 
   try {
     await sendNotification({ phoneNumber: subscription.phone_number, message: confirmationMessage });
     log('green', `Confirmation notification sent to ${subscription.email} (${subscription.phone_number}).`);
+
+    // Track successful confirmation notification
+    track({
+      distinctId: email,
+      event: 'confirmation_notification_sent',
+      properties: {
+        subscriptionId: subscription.id,
+        productId: product.id
+      }
+    });
   } catch (error) {
     log('red', `Failed to send confirmation notification to ${subscription.email} (${subscription.phone_number}): ${error.message}`);
+
+    // Track failed confirmation notification
+    track({
+      distinctId: email,
+      event: 'confirmation_notification_failed',
+      properties: {
+        subscriptionId: subscription.id,
+        productId: product.id,
+        error: error.message
+      }
+    });
   }
 
   return {
@@ -266,7 +467,7 @@ function deleteSubscription(subscriptionId) {
     stopMonitor(subscription.product_id);
   }
 
-  return { removed: true, status: updated.status, statusChangedAt: updated.status_changed_at };
+  return { removed: true, email: subscription.email, status: updated.status, statusChangedAt: updated.status_changed_at };
 }
 
 function getSubscriptionsByEmail(email) {

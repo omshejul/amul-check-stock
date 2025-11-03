@@ -37,6 +37,7 @@ A Node.js service that monitors Amul product stock availability for multiple use
 - ✅ Phone notifications via Node-RED when stock returns
 - ✅ Subscriptions auto-expire after successful notifications (history retained)
 - ✅ Instant confirmation notification when a subscription is activated
+- ✅ Optional PostHog analytics integration for tracking user behavior and service health
 
 ### How It Works
 
@@ -96,9 +97,60 @@ NOTIFICATION_API_URL=https://nodered.omshejul.com/message/sendText/bot
 NOTIFICATION_API_KEY=1234
 API_KEY=your-secure-api-key-here
 PORT=3000
+
+# Optional: PostHog Analytics
+POSTHOG_API_KEY=your-posthog-api-key
+POSTHOG_HOST=https://app.posthog.com
 ```
 
 The `API_KEY` is required for authentication on all API endpoints (except `/health`). The notification configuration and `PORT` are also stored in environment variables. Product URLs, pincodes, intervals, phone numbers, and subscriber emails are provided per request by the frontend.
+
+**PostHog Analytics (Optional):**  
+PostHog is completely optional and will not affect the service if not configured. When enabled, it tracks comprehensive events across the entire application lifecycle.
+
+**Server Lifecycle:**
+- `server_started` - when the server starts up (includes port, Node version)
+- `server_shutdown` - when the server shuts down gracefully (includes signal type)
+- `monitors_initialized` - when existing monitors are loaded on startup
+
+**User Actions:**
+- `subscription_created` - when a user creates a subscription
+- `subscriptions_queried` - when subscriptions are queried
+- `subscription_deleted` - when a subscription is deleted
+- `subscription_reactivated` - when an expired/deleted subscription is reactivated
+- `subscription_expired` - when a subscription auto-expires after successful notification
+
+**Product & Monitor Lifecycle:**
+- `product_created` - when a new product is added to monitoring
+- `product_reused` - when subscribing to an already monitored product
+- `monitor_started` - when a new monitoring process begins
+- `monitor_stopped` - when monitoring stops (no active subscriptions)
+- `monitor_reused` - when an existing monitor is reused for a new subscription
+
+**Stock Monitoring:**
+- `stock_check_completed` - after each stock availability check
+- `stock_status_changed` - when stock status changes (e.g., OUT OF STOCK → IN STOCK)
+- `stock_available_notification_sent` - when a stock notification is successfully sent
+
+**Notifications:**
+- `confirmation_notification_sent` - when subscription confirmation is sent
+- `confirmation_notification_failed` - when confirmation notification fails
+
+**API & Security:**
+- `health_check` - when the /health endpoint is accessed
+- `auth_failed_missing_header` - when authorization header is missing
+- `auth_failed_invalid_format` - when authorization format is incorrect
+- `auth_failed_invalid_token` - when an invalid token is provided
+
+**Errors:**
+- `subscription_creation_failed` - when subscription creation fails
+- `stock_notification_failed` - when a notification fails to send
+- `stock_check_error` - when stock checking encounters an error (e.g., Puppeteer failures)
+- `initial_stock_check_failed` - when the initial stock check for a new monitor fails
+
+All events include relevant properties (IDs, URLs, error messages, etc.) for detailed analytics and debugging.
+
+Simply omit the `POSTHOG_API_KEY` to run without analytics.
 
 3. Ensure the `data/` directory exists (it is created automatically on install) and is writable; SQLite stores `data/stock-checker.db`.
 
