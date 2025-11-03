@@ -49,8 +49,9 @@ RUN pnpm install --frozen-lockfile --prod --ignore-scripts && \
 
 COPY . .
 
-# Set correct permissions for node user
-RUN chown -R node:node /app
+# Create data directory and set correct permissions for node user
+RUN mkdir -p /app/data && \
+    chown -R node:node /app
 
 USER node
 
