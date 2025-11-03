@@ -8,6 +8,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     build-essential \
     python3 \
     pkg-config \
+    su-exec \
     chromium \
     libasound2 \
     libx11-xcb1 \
@@ -49,16 +50,19 @@ RUN pnpm install --frozen-lockfile --prod --ignore-scripts && \
 
 COPY . .
 
+# Copy and setup entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Create data directory and set correct permissions for node user
 RUN mkdir -p /app/data && \
     chown -R node:node /app
-
-USER node
 
 EXPOSE 3000
 
 VOLUME ["/app/data"]
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "index.js"]
 
 
