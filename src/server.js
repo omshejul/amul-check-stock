@@ -124,14 +124,14 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
     });
   } catch (error) {
     console.error('Failed to create subscription:', error);
-    
+
     // Capture exception in PostHog
     captureException(error, email || 'unknown', {
       context: 'subscription_creation',
       productUrl,
       deliveryPincode
     });
-    
+
     // Track error event in PostHog
     track({
       distinctId: email || 'unknown',

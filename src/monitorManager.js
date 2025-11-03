@@ -189,14 +189,14 @@ async function runProductCheck(productId) {
           });
         } catch (error) {
           log('red', `Failed to send notification to ${subscription.email} (${subscription.phone_number}): ${error.message}`);
-          
+
           // Capture exception in PostHog
           captureException(error, subscription.email, {
             context: 'stock_notification',
             productId,
             subscriptionId: subscription.id
           });
-          
+
           // Track failed notification in PostHog
           track({
             distinctId: subscription.email,
@@ -222,14 +222,14 @@ async function runProductCheck(productId) {
     }
   } catch (error) {
     log('red', `Error monitoring product ${productId}: ${error.message}`);
-    
+
     // Capture exception in PostHog
     captureException(error, `product_${productId}`, {
       context: 'stock_check',
       productId,
       productUrl: product?.url
     });
-    
+
     // Track stock check errors in PostHog
     track({
       distinctId: `product_${productId}`,
@@ -290,14 +290,14 @@ function startMonitor(product) {
 
   runProductCheck(product.id).catch((error) => {
     log('red', `Initial check failed for product ${product.id}: ${error.message}`);
-    
+
     // Capture exception in PostHog
     captureException(error, `product_${product.id}`, {
       context: 'initial_stock_check',
       productId: product.id,
       productUrl: product.url
     });
-    
+
     // Track initial check failures in PostHog
     track({
       distinctId: `product_${product.id}`,
@@ -448,14 +448,14 @@ async function addSubscription({ productUrl, deliveryPincode, intervalMinutes = 
     });
   } catch (error) {
     log('red', `Failed to send confirmation notification to ${subscription.email} (${subscription.phone_number}): ${error.message}`);
-    
+
     // Capture exception in PostHog
     captureException(error, email, {
       context: 'confirmation_notification',
       subscriptionId: subscription.id,
       productId: product.id
     });
-    
+
     // Track failed confirmation notification
     track({
       distinctId: email,
