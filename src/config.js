@@ -29,6 +29,9 @@ module.exports = {
   posthog: {
     apiKey: process.env.POSTHOG_API_KEY || null,
     host: process.env.POSTHOG_HOST || null
+  },
+  monitor: {
+    maxConcurrentChecks: Number.parseInt(process.env.MAX_CONCURRENT_CHECKS || '3', 10)
   }
 };
 

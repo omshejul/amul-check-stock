@@ -174,17 +174,28 @@ async function setDeliveryPincode(page, deliveryPincode) {
 
     try {
       await Promise.race([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 4000 }),
-        delay(2000)
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 5000 }),
+        delay(3000)
       ]);
     } catch (error) {
       // Ignore timeout
     }
 
-    const success = await page.evaluate((pin) => {
-      const body = document.body.innerText || '';
-      return body.includes(pin);
-    }, deliveryPincode);
+    // Wait a bit more for the page to stabilize after navigation
+    await delay(1000);
+
+    // Safely check if pincode was applied
+    let success = false;
+    try {
+      success = await page.evaluate((pin) => {
+        const body = document.body.innerText || '';
+        return body.includes(pin);
+      }, deliveryPincode);
+    } catch (error) {
+      // If evaluation fails due to navigation, assume success and let the main function verify
+      console.log(colorize({ color: 'yellow' }, 'Could not verify pincode due to page navigation'));
+      success = false;
+    }
 
     if (success) {
       console.log(colorize({ color: 'green' }, '✓ Delivery pincode applied'));
@@ -223,12 +234,18 @@ async function checkProductStock({ productUrl, deliveryPincode }) {
 
     await setDeliveryPincode(page, deliveryPincode);
 
+    // Give the page time to stabilize after pincode setting
+    await delay(2000);
+
     if (page.url() !== productUrl) {
       await page.goto(productUrl, {
-        waitUntil: 'domcontentloaded',
+        waitUntil: 'networkidle2',
         timeout: 30000
       });
-      await delay(4000);
+      await delay(3000);
+    } else {
+      // Even if we're on the same URL, wait a bit for any dynamic updates
+      await delay(2000);
     }
 
     try {
@@ -263,8 +280,12 @@ async function checkProductStock({ productUrl, deliveryPincode }) {
       const toLower = (text) => normalize(text).toLowerCase();
       const isVisible = (el) => {
         if (!el) return false;
-        const style = window.getComputedStyle(el);
-        return style && style.display !== 'none' && style.visibility !== 'hidden' && parseFloat(style.opacity || '1') > 0 && el.offsetParent !== null;
+        try {
+          const style = window.getComputedStyle(el);
+          return style && style.display !== 'none' && style.visibility !== 'hidden' && parseFloat(style.opacity || '1') > 0 && el.offsetParent !== null;
+        } catch (error) {
+          return false;
+        }
       };
 
       const result = {
@@ -279,7 +300,11 @@ async function checkProductStock({ productUrl, deliveryPincode }) {
       let addToCartEl = primaryAddToCart;
 
       if (!addToCartEl) {
-        addToCartEl = Array.from(document.querySelectorAll('button, a')).find((el) => toLower(el.textContent).includes('add to cart')) || null;
+        try {
+          addToCartEl = Array.from(document.querySelectorAll('button, a')).find((el) => toLower(el.textContent).includes('add to cart')) || null;
+        } catch (error) {
+          addToCartEl = null;
+        }
       }
 
       if (addToCartEl) {
@@ -293,7 +318,11 @@ async function checkProductStock({ productUrl, deliveryPincode }) {
 
       let productSection = null;
       if (addToCartEl) {
-        productSection = addToCartEl.closest('.product-detail, .product-details, .product-info, .product-content, .product-right, .product_page, .product-layout, .product-summary, form');
+        try {
+          productSection = addToCartEl.closest('.product-detail, .product-details, .product-info, .product-content, .product-right, .product_page, .product-layout, .product-summary, form');
+        } catch (error) {
+          productSection = null;
+        }
       }
 
       if (!productSection) {
@@ -304,17 +333,36 @@ async function checkProductStock({ productUrl, deliveryPincode }) {
         productSection = document.querySelector('main') || document.body;
       }
 
-      const sectionText = toLower(productSection ? productSection.innerText : '');
-      result.sectionTextSnippet = sectionText.slice(0, 500);
-      result.bodyTextSnippet = toLower(document.body.innerText).slice(0, 500);
+      let sectionText = '';
+      let bodyText = '';
 
-      result.notifyButtons = Array.from(productSection.querySelectorAll('button, a'))
-        .filter((el) => isVisible(el) && toLower(el.textContent).includes('notify me'))
-        .map((el) => normalize(el.textContent));
+      try {
+        sectionText = toLower(productSection && productSection.innerText ? productSection.innerText : '');
+        result.sectionTextSnippet = sectionText.slice(0, 500);
+      } catch (error) {
+        result.sectionTextSnippet = '';
+      }
 
-      result.soldOutBadges = Array.from(productSection.querySelectorAll('[class*="sold"], [class*="out"], [id*="sold"], [id*="out"]'))
-        .filter((el) => isVisible(el) && (toLower(el.textContent).includes('sold out') || toLower(el.textContent).includes('out of stock') || toLower(el.textContent).includes('currently unavailable')))
-        .map((el) => normalize(el.textContent));
+      try {
+        bodyText = toLower(document.body && document.body.innerText ? document.body.innerText : '');
+        result.bodyTextSnippet = bodyText.slice(0, 500);
+      } catch (error) {
+        result.bodyTextSnippet = '';
+      }
+
+      try {
+        if (productSection) {
+          result.notifyButtons = Array.from(productSection.querySelectorAll('button, a'))
+            .filter((el) => isVisible(el) && toLower(el.textContent).includes('notify me'))
+            .map((el) => normalize(el.textContent));
+
+          result.soldOutBadges = Array.from(productSection.querySelectorAll('[class*="sold"], [class*="out"], [id*="sold"], [id*="out"]'))
+            .filter((el) => isVisible(el) && (toLower(el.textContent).includes('sold out') || toLower(el.textContent).includes('out of stock') || toLower(el.textContent).includes('currently unavailable')))
+            .map((el) => normalize(el.textContent));
+        }
+      } catch (error) {
+        // Ignore errors when querying for buttons/badges
+      }
 
       return result;
     });

@@ -2,6 +2,7 @@ const db = require('./db');
 const { checkProductStock } = require('./stockChecker');
 const { sendNotification } = require('./notification');
 const { track, captureException } = require('./analytics');
+const { monitor: monitorConfig } = require('./config');
 
 const COLORS = {
   green: '\x1b[32m',
@@ -83,6 +84,25 @@ const selectProductsWithActiveSubscriptionsStmt = db.prepare(`
 
 const monitors = new Map();
 
+// Global concurrency control
+const DEFAULT_MAX_CONCURRENT_CHECKS = 3;
+const configuredMaxConcurrentChecks = monitorConfig?.maxConcurrentChecks;
+
+const MAX_CONCURRENT_CHECKS = Number.isInteger(configuredMaxConcurrentChecks) && configuredMaxConcurrentChecks > 0
+  ? configuredMaxConcurrentChecks
+  : DEFAULT_MAX_CONCURRENT_CHECKS;
+
+if (MAX_CONCURRENT_CHECKS !== configuredMaxConcurrentChecks) {
+  console.warn(
+    `⚠️ Monitor: Invalid max concurrent checks value "${configuredMaxConcurrentChecks}". Falling back to ${MAX_CONCURRENT_CHECKS}.`
+  );
+}
+
+const checkQueue = [];
+let activeChecks = 0;
+
+console.log(`🔧 Monitor: Max concurrent checks set to ${MAX_CONCURRENT_CHECKS}`);
+
 function log(color, message) {
   console.log(`${COLORS[color] || ''}${message}${COLORS.reset}`);
 }
@@ -92,15 +112,52 @@ function getIntervalMs(intervalMinutes) {
   return Number.isNaN(minutes) || minutes <= 0 ? 5 * 60 * 1000 : minutes * 60 * 1000;
 }
 
+function processQueue() {
+  while (activeChecks < MAX_CONCURRENT_CHECKS && checkQueue.length > 0) {
+    const { productId, resolve, reject } = checkQueue.shift();
+    activeChecks++;
+
+    executeProductCheck(productId)
+      .then(resolve)
+      .catch(reject)
+      .finally(() => {
+        activeChecks--;
+        processQueue(); // Process next item in queue
+      });
+  }
+}
+
 async function runProductCheck(productId) {
+  // Add to queue and return a promise
+  return new Promise((resolve, reject) => {
+    const monitor = monitors.get(productId);
+    if (!monitor) {
+      resolve();
+      return;
+    }
+
+    if (monitor.isChecking) {
+      log('yellow', `Skipping check for product ${productId} because a previous check is still running.`);
+      resolve();
+      return;
+    }
+
+    // Mark as checking to prevent duplicate queue entries
+    monitor.isChecking = true;
+
+    checkQueue.push({ productId, resolve, reject });
+
+    if (checkQueue.length > 1) {
+      log('blue', `Product ${productId} added to queue. Position: ${checkQueue.length}, Active checks: ${activeChecks}/${MAX_CONCURRENT_CHECKS}`);
+    }
+
+    processQueue();
+  });
+}
+
+async function executeProductCheck(productId) {
   const monitor = monitors.get(productId);
   if (!monitor) return;
-  if (monitor.isChecking) {
-    log('yellow', `Skipping check for product ${productId} because a previous check is still running.`);
-    return;
-  }
-
-  monitor.isChecking = true;
 
   try {
     const product = selectProductByIdStmt.get(productId);
