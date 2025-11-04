@@ -73,7 +73,9 @@ const selectSubscriptionsByEmailStmt = db.prepare(`
          s.status_changed_at,
          p.url,
          p.delivery_pincode,
-         p.interval_minutes
+         p.interval_minutes,
+         p.product_name,
+         p.image_url
   FROM subscriptions s
   JOIN products p ON s.product_id = p.id
   WHERE lower(s.email) = lower(?)
