@@ -93,7 +93,7 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
   }
 
   try {
-    const { productId, subscriptionId, status, statusChangedAt } = await addSubscription({
+    const { productId, subscriptionId, status, statusChangedAt, productName, imageUrl, productUrl: url, deliveryPincode: pincode } = await addSubscription({
       productUrl,
       deliveryPincode,
       phoneNumber,
@@ -110,7 +110,9 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
         productId,
         deliveryPincode,
         intervalMinutes: intervalMinutes || 30,
-        status
+        status,
+        productName,
+        imageUrl
       }
     });
 
@@ -120,7 +122,13 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
       subscriptionId,
       email,
       status,
-      statusChangedAt
+      statusChangedAt,
+      product: {
+        name: productName,
+        imageUrl,
+        url,
+        deliveryPincode: pincode
+      }
     });
   } catch (error) {
     console.error('Failed to create subscription:', error);

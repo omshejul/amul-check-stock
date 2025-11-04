@@ -59,5 +59,16 @@ db.exec(`
   ON subscriptions(product_id, email);
 `);
 
+// Add product_name and image_url columns to products table if they don't exist
+const productColumns = db.prepare('PRAGMA table_info(products)').all();
+
+if (!productColumns.some((column) => column.name === 'product_name')) {
+  db.exec('ALTER TABLE products ADD COLUMN product_name TEXT');
+}
+
+if (!productColumns.some((column) => column.name === 'image_url')) {
+  db.exec('ALTER TABLE products ADD COLUMN image_url TEXT');
+}
+
 module.exports = db;
 

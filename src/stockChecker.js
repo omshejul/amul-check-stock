@@ -431,10 +431,103 @@ async function checkProductStock({ productUrl, deliveryPincode }) {
 
     const pageTitle = await page.title();
 
+    // Extract product image and name
+    const productInfo = await page.evaluate(() => {
+      let imageUrl = null;
+      let productName = null;
+
+      // Method 1: Try Open Graph meta tag (most reliable for e-commerce)
+      const ogImage = document.querySelector('meta[property="og:image"]');
+      if (ogImage) {
+        imageUrl = ogImage.getAttribute('content');
+      }
+
+      // Method 2: Try common product image selectors
+      if (!imageUrl) {
+        const selectors = [
+          '.product-image img',
+          '.product-detail img',
+          '.product-gallery img',
+          '[class*="product"] img[src*="cdn"]',
+          '[class*="product"] img[src*="shop"]',
+          'img[alt*="product"]',
+          '.main-image img'
+        ];
+
+        for (const selector of selectors) {
+          const img = document.querySelector(selector);
+          if (img && img.src && !img.src.includes('placeholder')) {
+            imageUrl = img.src;
+            break;
+          }
+        }
+      }
+
+      // Method 3: Find the largest visible image (fallback)
+      if (!imageUrl) {
+        const images = Array.from(document.querySelectorAll('img'));
+        const validImages = images
+          .filter((img) => {
+            const style = window.getComputedStyle(img);
+            return (
+              img.src &&
+              !img.src.includes('placeholder') &&
+              !img.src.includes('logo') &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              img.offsetParent !== null &&
+              img.naturalWidth >= 100 &&
+              img.naturalHeight >= 100
+            );
+          })
+          .sort((a, b) => (b.naturalWidth * b.naturalHeight) - (a.naturalWidth * a.naturalHeight));
+
+        if (validImages.length > 0) {
+          imageUrl = validImages[0].src;
+        }
+      }
+
+      // Extract product name
+      const ogTitle = document.querySelector('meta[property="og:title"]');
+      if (ogTitle) {
+        productName = ogTitle.getAttribute('content');
+      }
+
+      if (!productName) {
+        const titleSelectors = [
+          'h1.product-title',
+          'h1[class*="product"]',
+          '.product-name',
+          '.product-title',
+          'h1'
+        ];
+
+        for (const selector of titleSelectors) {
+          const element = document.querySelector(selector);
+          if (element && element.textContent.trim()) {
+            productName = element.textContent.trim();
+            break;
+          }
+        }
+      }
+
+      return { imageUrl, productName };
+    });
+
+    if (productInfo.imageUrl) {
+      console.log(colorize({ color: 'blue' }, `Product Image: ${productInfo.imageUrl}`));
+    }
+
+    if (productInfo.productName) {
+      console.log(colorize({ color: 'blue' }, `Product Name: ${productInfo.productName}`));
+    }
+
     return {
       isAvailable,
       stockStatus: stockStatus || 'UNKNOWN',
-      pageTitle
+      pageTitle,
+      imageUrl: productInfo.imageUrl || null,
+      productName: productInfo.productName || pageTitle
     };
   } catch (error) {
     console.error(colorize({ color: 'red' }, `Error checking stock: ${error.message}`));

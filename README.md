@@ -31,6 +31,8 @@ A Node.js service that monitors Amul product stock availability for multiple use
 ### Features
 
 - ✅ Automatic delivery pincode handling before every check
+- ✅ **Product image and name extraction** (cached in database)
+- ✅ **Concurrent check queue system** (configurable rate limiting)
 - ✅ Shared Puppeteer checks for duplicate product requests
 - ✅ SQLite-backed persistence for products and subscribers
 - ✅ REST API to add/remove monitoring jobs
@@ -43,12 +45,14 @@ A Node.js service that monitors Amul product stock availability for multiple use
 
 1. Launches a headless Chrome browser with Puppeteer
 2. Navigates to the product page
-3. Applies the provided delivery pincode (resilient to popups and suggestions)
-4. Waits for the page to render fully
-5. Analyzes DOM elements and text for stock indicators
-6. Shares results with all subscribers attached to that product
-7. Sends Node-RED notifications when stock transitions to **IN STOCK**
-8. Marks notified subscriptions as `expired` and pauses the monitor until someone reactivates it
+3. **Extracts product name and image URL** (using Open Graph tags and fallback selectors)
+4. Applies the provided delivery pincode (resilient to popups and suggestions)
+5. Waits for the page to render fully
+6. Analyzes DOM elements and text for stock indicators
+7. **Caches product metadata in database** for reuse
+8. Shares results with all subscribers attached to that product
+9. Sends Node-RED notifications (with product image and name) when stock transitions to **IN STOCK**
+10. Marks notified subscriptions as `expired` and pauses the monitor until someone reactivates it
 
 ### Deduplication & Scheduling
 
@@ -98,12 +102,18 @@ NOTIFICATION_API_KEY=1234
 API_KEY=your-secure-api-key-here
 PORT=3000
 
+# Optional: Concurrency Control
+MAX_CONCURRENT_CHECKS=3
+
 # Optional: PostHog Analytics
 POSTHOG_API_KEY=your-posthog-api-key
 POSTHOG_HOST=https://app.posthog.com
 ```
 
 The `API_KEY` is required for authentication on all API endpoints (except `/health`). The notification configuration and `PORT` are also stored in environment variables. Product URLs, pincodes, intervals, phone numbers, and subscriber emails are provided per request by the frontend.
+
+**Concurrency Control (Optional):**  
+`MAX_CONCURRENT_CHECKS` limits how many Puppeteer browsers can run simultaneously (default: 3). This prevents resource exhaustion and rate limiting. If more checks are triggered, they're queued and processed sequentially. Increase this value if you have more server resources and need higher throughput.
 
 **PostHog Analytics (Optional):**  
 PostHog is completely optional and will not affect the service if not configured. When enabled, it tracks comprehensive events across the entire application lifecycle.
@@ -299,9 +309,23 @@ curl -X POST http://localhost:3000/checks \
   "subscriptionId": 42,
   "email": "user@example.com",
   "status": "active",
-  "statusChangedAt": "2024-11-03T10:00:00Z"
+  "statusChangedAt": "2024-11-03T10:00:00Z",
+  "product": {
+    "name": "Amul High Protein Milk 250ml",
+    "imageUrl": "https://shop.amul.com/s/62fa94df8c13af2e242eba16/66741c9ab3f343317949fae8/01-hero-image_amul-high-protein-milk-250ml-8-480x480.png",
+    "url": "https://shop.amul.com/en/product/amul-high-protein-milk-250-ml-or-pack-of-8",
+    "deliveryPincode": "431136"
+  }
 }
 ```
+
+**Product Metadata:**
+- `product.name` - Extracted product name (from Open Graph tags or page title)
+- `product.imageUrl` - Product thumbnail URL (typically 480×480 PNG, cached for reuse)
+- `product.url` - The monitored product URL
+- `product.deliveryPincode` - The delivery pincode for this subscription
+
+These values are automatically extracted on the first stock check and cached in the database. If extraction fails, `name` and `imageUrl` may be `null`.
 
 Immediately after a subscription is created (or re-activated), the service sends a confirmation notification to the provided phone number so the user knows monitoring has started.
 
@@ -334,13 +358,21 @@ curl "http://localhost:3000/subscriptions?email=user@example.com" \
       "created_at": "2024-11-03T10:00:00Z",
       "status": "expired",
       "status_changed_at": "2024-11-03T10:30:12Z",
-      "url": "https://shop.amul.com/en/product/...",
+      "url": "https://shop.amul.com/en/product/amul-high-protein-milk-250-ml-or-pack-of-8",
       "delivery_pincode": "431136",
-      "interval_minutes": 5
+      "interval_minutes": 5,
+      "product_name": "Amul High Protein Milk 250ml",
+      "image_url": "https://shop.amul.com/s/62fa94df8c13af2e242eba16/66741c9ab3f343317949fae8/01-hero-image_amul-high-protein-milk-250ml-8-480x480.png"
     }
   ]
 }
 ```
+
+**New Fields:**
+- `product_name` - The extracted product name (null if not yet fetched)
+- `image_url` - The product thumbnail URL (null if not available)
+
+These fields are automatically populated when a product is monitored and are shared across all subscriptions for the same product.
 
 ### DELETE /checks/:subscriptionId
 

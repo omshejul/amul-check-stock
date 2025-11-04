@@ -18,6 +18,13 @@ const insertProductStmt = db.prepare(`
   ON CONFLICT(url, delivery_pincode, interval_minutes) DO NOTHING
 `);
 
+const updateProductMetadataStmt = db.prepare(`
+  UPDATE products
+  SET product_name = @product_name,
+      image_url = @image_url
+  WHERE id = @id
+`);
+
 const selectProductStmt = db.prepare(`
   SELECT * FROM products
   WHERE url = ? AND delivery_pincode = ? AND interval_minutes = ?
@@ -172,6 +179,23 @@ async function executeProductCheck(productId) {
       deliveryPincode: product.delivery_pincode
     });
 
+    // Update product metadata if we got new information
+    if (result.productName || result.imageUrl) {
+      try {
+        updateProductMetadataStmt.run({
+          id: productId,
+          product_name: result.productName || null,
+          image_url: result.imageUrl || null
+        });
+
+        // Refresh product data to get updated info
+        const updatedProduct = selectProductByIdStmt.get(productId);
+        Object.assign(product, updatedProduct);
+      } catch (error) {
+        log('yellow', `Could not update product metadata: ${error.message}`);
+      }
+    }
+
     const previousStatus = monitor.lastStatus;
     monitor.lastStatus = result.stockStatus;
 
@@ -214,9 +238,19 @@ async function executeProductCheck(productId) {
       let expiredCount = 0;
 
       for (const subscription of subscriptions) {
-        const message = `🎉 Stock Available! 🎉\n\nProduct: ${product.url}\nPincode: ${product.delivery_pincode}\n\nStock status: ${result.stockStatus}\n\nPlace your order soon!`;
+        const productDisplayName = product.product_name || result.productName || 'Product';
+        const message = `🎉 Stock Available! 🎉\n\nProduct: ${productDisplayName}\nPincode: ${product.delivery_pincode}\n\nStock status: ${result.stockStatus}\n\n${product.url}\n\nPlace your order soon!`;
+
+        const notificationPayload = {
+          phoneNumber: subscription.phone_number,
+          message,
+          imageUrl: product.image_url || result.imageUrl || null,
+          productName: productDisplayName,
+          productUrl: product.url
+        };
+
         try {
-          await sendNotification({ phoneNumber: subscription.phone_number, message });
+          await sendNotification(notificationPayload);
           updateSubscriptionStatusStmt.run({ id: subscription.id, status: 'expired' });
           expiredCount += 1;
           log('green', `Notification dispatched to ${subscription.email} (${subscription.phone_number}) - subscription expired.`);
@@ -448,6 +482,33 @@ async function addSubscription({ productUrl, deliveryPincode, intervalMinutes = 
 
   const { product, subscription } = transaction();
 
+  // If product metadata is missing, fetch it now
+  if (!product.product_name || !product.image_url) {
+    log('blue', `Fetching product metadata for ${product.url}...`);
+    try {
+      const result = await checkProductStock({
+        productUrl: product.url,
+        deliveryPincode: product.delivery_pincode
+      });
+
+      if (result.productName || result.imageUrl) {
+        updateProductMetadataStmt.run({
+          id: product.id,
+          product_name: result.productName || null,
+          image_url: result.imageUrl || null
+        });
+
+        // Refresh product data
+        const updatedProduct = selectProductByIdStmt.get(product.id);
+        Object.assign(product, updatedProduct);
+
+        log('green', `✓ Product metadata fetched`);
+      }
+    } catch (error) {
+      log('yellow', `Could not fetch product metadata: ${error.message}`);
+    }
+  }
+
   // Track product creation or reuse
   if (isNewProduct) {
     track({
@@ -488,10 +549,19 @@ async function addSubscription({ productUrl, deliveryPincode, intervalMinutes = 
 
   startMonitor(product);
 
-  const confirmationMessage = `✅ Subscription active!\n\nProduct: ${product.url}\nPincode: ${product.delivery_pincode}\nFrequency: every ${product.interval_minutes} minute(s)\n\nYou'll receive an alert as soon as stock is available.`;
+  const productDisplayName = product.product_name || 'Product';
+  const confirmationMessage = `✅ Subscription active!\n\nProduct: ${productDisplayName}\nPincode: ${product.delivery_pincode}\nFrequency: every ${product.interval_minutes} minute(s)\n\n${product.url}\n\nYou'll receive an alert as soon as stock is available.`;
+
+  const confirmationPayload = {
+    phoneNumber: subscription.phone_number,
+    message: confirmationMessage,
+    imageUrl: product.image_url || null,
+    productName: productDisplayName,
+    productUrl: product.url
+  };
 
   try {
-    await sendNotification({ phoneNumber: subscription.phone_number, message: confirmationMessage });
+    await sendNotification(confirmationPayload);
     log('green', `Confirmation notification sent to ${subscription.email} (${subscription.phone_number}).`);
 
     // Track successful confirmation notification
@@ -529,7 +599,11 @@ async function addSubscription({ productUrl, deliveryPincode, intervalMinutes = 
     productId: product.id,
     subscriptionId: subscription.id,
     status: subscription.status,
-    statusChangedAt: subscription.status_changed_at
+    statusChangedAt: subscription.status_changed_at,
+    productName: product.product_name,
+    imageUrl: product.image_url,
+    productUrl: product.url,
+    deliveryPincode: product.delivery_pincode
   };
 }
 
