@@ -241,7 +241,7 @@ async function executeProductCheck(productId) {
 
       for (const subscription of subscriptions) {
         const productDisplayName = product.product_name || result.productName || 'Product';
-        const message = `🎉 Stock Available! 🎉\n\nProduct: ${productDisplayName}\nPincode: ${product.delivery_pincode}\n\nStock status: ${result.stockStatus}\n\n${product.url}\n\nPlace your order soon!`;
+        const message = `🎉 Stock Available! 🎉\n\nProduct: ${productDisplayName}\nPincode: ${product.delivery_pincode}\n\nStock status: ${result.stockStatus}\n\n${product.url}\n\nPlace your order soon!\n\nLiked this service? Please give us a star on GitHub ⭐\nhttps://github.com/omshejul/check-amul-stock-frontend`;
 
         const notificationPayload = {
           phoneNumber: subscription.phone_number,
@@ -645,4 +645,3 @@ module.exports = {
   deleteSubscription,
   getSubscriptionsByEmail
 };
-
