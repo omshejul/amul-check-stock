@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test": "node --test --test-concurrency=1",
+    "test:live": "node scripts/smokeAmulCatalog.js"
   },
   "keywords": [],
   "author": "",
@@ -15,7 +17,8 @@
     "better-sqlite3": "^12.4.1",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "node-cron": "^4.6.0",
     "posthog-node": "^5.11.0",
-    "puppeteer": "^24.27.0"
+    "tough-cookie": "^5.1.2"
   }
 }

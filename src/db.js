@@ -5,7 +5,7 @@ const Database = require('better-sqlite3');
 const dataDir = path.join(__dirname, '..', 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 
-const dbPath = path.join(dataDir, 'stock-checker.db');
+const dbPath = process.env.STOCK_CHECKER_DB_PATH || path.join(dataDir, 'stock-checker.db');
 const db = new Database(dbPath);
 
 db.pragma('journal_mode = WAL');
@@ -15,7 +15,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     url TEXT NOT NULL,
     delivery_pincode TEXT NOT NULL,
-    interval_minutes INTEGER NOT NULL DEFAULT 5,
+    interval_minutes INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(url, delivery_pincode, interval_minutes)
   );
@@ -70,5 +70,24 @@ if (!productColumns.some((column) => column.name === 'image_url')) {
   db.exec('ALTER TABLE products ADD COLUMN image_url TEXT');
 }
 
-module.exports = db;
+if (!productColumns.some((column) => column.name === 'substore')) {
+  db.exec('ALTER TABLE products ADD COLUMN substore TEXT');
+}
 
+if (!productColumns.some((column) => column.name === 'amul_product_id')) {
+  db.exec('ALTER TABLE products ADD COLUMN amul_product_id TEXT');
+}
+
+if (!productColumns.some((column) => column.name === 'last_stock_status')) {
+  db.exec('ALTER TABLE products ADD COLUMN last_stock_status TEXT');
+}
+
+if (!productColumns.some((column) => column.name === 'last_inventory_quantity')) {
+  db.exec('ALTER TABLE products ADD COLUMN last_inventory_quantity INTEGER');
+}
+
+if (!productColumns.some((column) => column.name === 'last_checked_at')) {
+  db.exec('ALTER TABLE products ADD COLUMN last_checked_at TEXT');
+}
+
+module.exports = db;

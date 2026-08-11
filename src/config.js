@@ -23,15 +23,8 @@ module.exports = {
     port: Number.parseInt(process.env.PORT || '3000', 10),
     apiKey: process.env.API_KEY
   },
-  puppeteer: {
-    headless: process.env.PUPPETEER_HEADLESS || 'new'
-  },
   posthog: {
     apiKey: process.env.POSTHOG_API_KEY || null,
     host: process.env.POSTHOG_HOST || null
-  },
-  monitor: {
-    maxConcurrentChecks: Number.parseInt(process.env.MAX_CONCURRENT_CHECKS || '3', 10)
   }
 };
-

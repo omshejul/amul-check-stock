@@ -84,7 +84,7 @@ app.get('/health', (req, res) => {
 });
 
 app.post('/checks', authenticateApiKey, async (req, res) => {
-  const { productUrl, deliveryPincode, phoneNumber, email, intervalMinutes } = req.body || {};
+  const { productUrl, deliveryPincode, phoneNumber, email } = req.body || {};
 
   if (!productUrl || !deliveryPincode || !phoneNumber || !email) {
     return res.status(400).json({
@@ -97,8 +97,7 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
       productUrl,
       deliveryPincode,
       phoneNumber,
-      email,
-      intervalMinutes
+      email
     });
 
     // Track subscription creation in PostHog
@@ -109,7 +108,7 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
         subscriptionId,
         productId,
         deliveryPincode,
-        intervalMinutes: intervalMinutes || 30,
+        intervalMinutes: 1,
         status,
         productName,
         imageUrl
@@ -271,4 +270,3 @@ function startServer() {
 module.exports = {
   startServer
 };
-

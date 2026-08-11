@@ -1,600 +1,257 @@
+const cron = require('node-cron');
 const db = require('./db');
-const { checkProductStock } = require('./stockChecker');
+const { AmulCatalogPool, findProduct, getInventoryQuantity, getProductImageUrl, isAvailableToPurchase } = require('./amulCatalog');
 const { sendNotification } = require('./notification');
 const { track, captureException } = require('./analytics');
-const { monitor: monitorConfig } = require('./config');
 
-const COLORS = {
-  green: '\x1b[32m',
-  red: '\x1b[31m',
-  yellow: '\x1b[33m',
-  blue: '\x1b[34m',
-  reset: '\x1b[0m'
-};
+const catalogPool = new AmulCatalogPool();
+let catalogTask = null;
+let checkRunning = false;
 
 const insertProductStmt = db.prepare(`
   INSERT INTO products (url, delivery_pincode, interval_minutes)
-  VALUES (@url, @delivery_pincode, @interval_minutes)
+  VALUES (@url, @delivery_pincode, 1)
   ON CONFLICT(url, delivery_pincode, interval_minutes) DO NOTHING
 `);
-
-const updateProductMetadataStmt = db.prepare(`
-  UPDATE products
-  SET product_name = @product_name,
-      image_url = @image_url
-  WHERE id = @id
-`);
-
 const selectProductStmt = db.prepare(`
-  SELECT * FROM products
-  WHERE url = ? AND delivery_pincode = ? AND interval_minutes = ?
+  SELECT * FROM products WHERE url = ? AND delivery_pincode = ? AND interval_minutes = 1
 `);
-
 const selectProductByIdStmt = db.prepare('SELECT * FROM products WHERE id = ?');
-
 const insertSubscriptionStmt = db.prepare(`
   INSERT INTO subscriptions (product_id, email, phone_number, status, status_changed_at)
   VALUES (@product_id, @email, @phone_number, 'active', CURRENT_TIMESTAMP)
-  ON CONFLICT(product_id, email)
-  DO UPDATE SET
+  ON CONFLICT(product_id, email) DO UPDATE SET
     phone_number = excluded.phone_number,
     status = 'active',
     status_changed_at = CURRENT_TIMESTAMP
 `);
-
-const selectSubscriptionStmt = db.prepare(`
-  SELECT * FROM subscriptions WHERE product_id = ? AND email = ?
-`);
-
+const selectSubscriptionStmt = db.prepare('SELECT * FROM subscriptions WHERE product_id = ? AND email = ?');
 const selectSubscriptionByIdStmt = db.prepare('SELECT * FROM subscriptions WHERE id = ?');
-
 const updateSubscriptionStatusStmt = db.prepare(`
-  UPDATE subscriptions
-  SET status = @status,
-      status_changed_at = CURRENT_TIMESTAMP
-  WHERE id = @id
+  UPDATE subscriptions SET status = @status, status_changed_at = CURRENT_TIMESTAMP WHERE id = @id
 `);
-
 const selectActiveSubscriptionsByProductStmt = db.prepare(`
   SELECT id, email, phone_number FROM subscriptions WHERE product_id = ? AND status = 'active'
 `);
-
-const countActiveSubscriptionsByProductStmt = db.prepare(`
-  SELECT COUNT(*) as total FROM subscriptions WHERE product_id = ? AND status = 'active'
-`);
-
 const selectSubscriptionsByEmailStmt = db.prepare(`
-  SELECT s.id,
-         s.product_id,
-         s.email,
-         s.phone_number,
-         s.created_at,
-         s.status,
-         s.status_changed_at,
-         p.url,
-         p.delivery_pincode,
-         p.interval_minutes,
-         p.product_name,
-         p.image_url
+  SELECT s.id, s.product_id, s.email, s.phone_number, s.created_at, s.status, s.status_changed_at,
+         p.url, p.delivery_pincode, p.interval_minutes, p.product_name, p.image_url
   FROM subscriptions s
   JOIN products p ON s.product_id = p.id
   WHERE lower(s.email) = lower(?)
   ORDER BY s.created_at DESC
 `);
-
 const selectProductsWithActiveSubscriptionsStmt = db.prepare(`
-  SELECT p.*
-  FROM products p
+  SELECT p.* FROM products p
   WHERE EXISTS (
-    SELECT 1 FROM subscriptions s
-    WHERE s.product_id = p.id AND s.status = 'active'
+    SELECT 1 FROM subscriptions s WHERE s.product_id = p.id AND s.status = 'active'
   )
 `);
+const updateProductCatalogStmt = db.prepare(`
+  UPDATE products SET
+    substore = @substore,
+    amul_product_id = COALESCE(@amul_product_id, amul_product_id),
+    product_name = COALESCE(@product_name, product_name),
+    image_url = COALESCE(@image_url, image_url),
+    last_stock_status = @last_stock_status,
+    last_inventory_quantity = @last_inventory_quantity,
+    last_checked_at = CURRENT_TIMESTAMP
+  WHERE id = @id
+`);
+const updateProductSubstoreStmt = db.prepare('UPDATE products SET substore = ? WHERE id = ?');
 
-const monitors = new Map();
-
-// Global concurrency control
-const DEFAULT_MAX_CONCURRENT_CHECKS = 3;
-const configuredMaxConcurrentChecks = monitorConfig?.maxConcurrentChecks;
-
-const MAX_CONCURRENT_CHECKS = Number.isInteger(configuredMaxConcurrentChecks) && configuredMaxConcurrentChecks > 0
-  ? configuredMaxConcurrentChecks
-  : DEFAULT_MAX_CONCURRENT_CHECKS;
-
-if (MAX_CONCURRENT_CHECKS !== configuredMaxConcurrentChecks) {
-  console.warn(
-    `⚠️ Monitor: Invalid max concurrent checks value "${configuredMaxConcurrentChecks}". Falling back to ${MAX_CONCURRENT_CHECKS}.`
-  );
+function log(level, message) {
+  const colors = { green: '\x1b[32m', red: '\x1b[31m', yellow: '\x1b[33m', blue: '\x1b[34m' };
+  console.log(`${colors[level] || ''}${message}\x1b[0m`);
 }
 
-const checkQueue = [];
-let activeChecks = 0;
+async function notifyAvailableSubscriptions(product, catalogProduct, notificationSender) {
+  const subscriptions = selectActiveSubscriptionsByProductStmt.all(product.id);
+  const productName = catalogProduct.name || product.product_name || 'Product';
+  const imageUrl = product.image_url || getProductImageUrl(catalogProduct) || null;
 
-console.log(`🔧 Monitor: Max concurrent checks set to ${MAX_CONCURRENT_CHECKS}`);
-
-function log(color, message) {
-  console.log(`${COLORS[color] || ''}${message}${COLORS.reset}`);
-}
-
-function getIntervalMs(intervalMinutes) {
-  const minutes = Number.parseInt(intervalMinutes, 10);
-  return Number.isNaN(minutes) || minutes <= 0 ? 5 * 60 * 1000 : minutes * 60 * 1000;
-}
-
-function processQueue() {
-  while (activeChecks < MAX_CONCURRENT_CHECKS && checkQueue.length > 0) {
-    const { productId, resolve, reject } = checkQueue.shift();
-    activeChecks++;
-
-    executeProductCheck(productId)
-      .then(resolve)
-      .catch(reject)
-      .finally(() => {
-        activeChecks--;
-        processQueue(); // Process next item in queue
+  for (const subscription of subscriptions) {
+    const message = `🎉 Stock Available! 🎉\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\n\nStock status: IN STOCK\n\n${product.url}\n\nPlace your order soon!\n\nLiked this service? Please give us a star on GitHub ⭐\nhttps://github.com/omshejul/check-amul-stock-frontend`;
+    try {
+      await notificationSender({
+        phoneNumber: subscription.phone_number,
+        message,
+        imageUrl,
+        productName,
+        productUrl: product.url
       });
+      updateSubscriptionStatusStmt.run({ id: subscription.id, status: 'expired' });
+      log('green', `Stock alert sent to ${subscription.email}; subscription expired.`);
+      track({
+        distinctId: subscription.email,
+        event: 'stock_available_notification_sent',
+        properties: { productId: product.id, subscriptionId: subscription.id, substore: product.substore }
+      });
+      track({
+        distinctId: subscription.email,
+        event: 'subscription_expired',
+        properties: { productId: product.id, subscriptionId: subscription.id, reason: 'stock_became_available' }
+      });
+    } catch (error) {
+      log('red', `Failed stock alert for ${subscription.email}: ${error.message}`);
+      captureException(error, subscription.email, {
+        context: 'stock_notification', productId: product.id, subscriptionId: subscription.id
+      });
+      track({
+        distinctId: subscription.email,
+        event: 'stock_notification_failed',
+        properties: { productId: product.id, subscriptionId: subscription.id, error: error.message }
+      });
+    }
   }
 }
 
-async function runProductCheck(productId) {
-  // Add to queue and return a promise
-  return new Promise((resolve, reject) => {
-    const monitor = monitors.get(productId);
-    if (!monitor) {
-      resolve();
-      return;
-    }
+async function runCatalogCheck({ pool = catalogPool, notificationSender = sendNotification } = {}) {
+  if (checkRunning) {
+    log('yellow', 'Skipping minute check because the previous run is still active.');
+    return { skipped: true, substores: 0, products: 0 };
+  }
 
-    if (monitor.isChecking) {
-      log('yellow', `Skipping check for product ${productId} because a previous check is still running.`);
-      resolve();
-      return;
-    }
-
-    // Mark as checking to prevent duplicate queue entries
-    monitor.isChecking = true;
-
-    checkQueue.push({ productId, resolve, reject });
-
-    if (checkQueue.length > 1) {
-      log('blue', `Product ${productId} added to queue. Position: ${checkQueue.length}, Active checks: ${activeChecks}/${MAX_CONCURRENT_CHECKS}`);
-    }
-
-    processQueue();
-  });
-}
-
-async function executeProductCheck(productId) {
-  const monitor = monitors.get(productId);
-  if (!monitor) return;
+  checkRunning = true;
+  const products = selectProductsWithActiveSubscriptionsStmt.all();
+  const groups = new Map();
 
   try {
-    const product = selectProductByIdStmt.get(productId);
-    if (!product) {
-      log('yellow', `Product ${productId} no longer exists. Stopping monitor.`);
-      stopMonitor(productId);
-      return;
-    }
-
-    const result = await checkProductStock({
-      productUrl: product.url,
-      deliveryPincode: product.delivery_pincode
-    });
-
-    // Update product metadata if we got new information
-    if (result.productName || result.imageUrl) {
+    for (const product of products) {
       try {
-        updateProductMetadataStmt.run({
-          id: productId,
-          product_name: result.productName || null,
-          image_url: result.imageUrl || null
-        });
-
-        // Refresh product data to get updated info
-        const updatedProduct = selectProductByIdStmt.get(productId);
-        Object.assign(product, updatedProduct);
+        const client = await pool.getForPincode(product.delivery_pincode, product.substore);
+        const substore = client.pincodeRecord.substore;
+        if (product.substore !== substore) updateProductSubstoreStmt.run(substore, product.id);
+        if (!groups.has(substore)) groups.set(substore, { client, products: [] });
+        groups.get(substore).products.push(product);
       } catch (error) {
-        log('yellow', `Could not update product metadata: ${error.message}`);
+        log('red', `Could not resolve pincode ${product.delivery_pincode}: ${error.message}`);
+        captureException(error, `product_${product.id}`, { context: 'substore_resolution', productId: product.id });
       }
     }
 
-    const previousStatus = monitor.lastStatus;
-    monitor.lastStatus = result.stockStatus;
+    for (const [substore, group] of groups) {
+      try {
+        const payload = await group.client.fetchCatalog();
+        const catalog = payload.data;
+        log('blue', `Fetched ${catalog.length} products for ${substore}; checking ${group.products.length} tracked product(s).`);
 
-    // Track stock status changes
-    if (previousStatus && previousStatus !== result.stockStatus) {
-      track({
-        distinctId: `product_${productId}`,
-        event: 'stock_status_changed',
-        properties: {
-          productId,
-          productUrl: product.url,
-          deliveryPincode: product.delivery_pincode,
-          previousStatus,
-          newStatus: result.stockStatus,
-          isAvailable: result.isAvailable
+        for (const product of group.products) {
+          const catalogProduct = findProduct(catalog, { sku: product.amul_product_id, url: product.url });
+          if (!catalogProduct) {
+            log('yellow', `Tracked product ${product.id} was not present in the ${substore} catalog.`);
+            continue;
+          }
+
+          const available = isAvailableToPurchase(catalogProduct);
+          const status = available ? 'IN STOCK' : 'OUT OF STOCK';
+          const previousStatus = product.last_stock_status;
+          const imageUrl = getProductImageUrl(catalogProduct, payload.fileBaseUrl);
+
+          updateProductCatalogStmt.run({
+            id: product.id,
+            substore,
+            amul_product_id: catalogProduct.sku || catalogProduct._id || null,
+            product_name: catalogProduct.name || null,
+            image_url: imageUrl,
+            last_stock_status: status,
+            last_inventory_quantity: getInventoryQuantity(catalogProduct)
+          });
+
+          if (previousStatus && previousStatus !== status) {
+            track({
+              distinctId: `product_${product.id}`,
+              event: 'stock_status_changed',
+              properties: { productId: product.id, previousStatus, newStatus: status, substore }
+            });
+          }
+          track({
+            distinctId: `product_${product.id}`,
+            event: 'stock_check_completed',
+            properties: { productId: product.id, stockStatus: status, isAvailable: available, substore }
+          });
+
+          if (available) {
+            await notifyAvailableSubscriptions({ ...product, substore, image_url: imageUrl }, catalogProduct, notificationSender);
+          }
         }
-      });
+      } catch (error) {
+        pool.invalidate(substore);
+        log('red', `Catalog check failed for ${substore}: ${error.message}`);
+        captureException(error, `substore_${substore}`, { context: 'catalog_check', substore });
+      }
     }
 
-    // Track stock check completed
     track({
-      distinctId: `product_${productId}`,
-      event: 'stock_check_completed',
-      properties: {
-        productId,
-        stockStatus: result.stockStatus,
-        isAvailable: result.isAvailable
-      }
+      distinctId: 'system',
+      event: 'catalog_check_completed',
+      properties: { substoreCount: groups.size, productCount: products.length }
     });
-
-    if (result.isAvailable) {
-      const subscriptions = selectActiveSubscriptionsByProductStmt.all(productId);
-
-      if (subscriptions.length === 0) {
-        if (previousStatus !== 'IN STOCK') {
-          log('yellow', `Product ${productId} is in stock, but there are no active subscriptions.`);
-        }
-      }
-
-      let expiredCount = 0;
-
-      for (const subscription of subscriptions) {
-        const productDisplayName = product.product_name || result.productName || 'Product';
-        const message = `🎉 Stock Available! 🎉\n\nProduct: ${productDisplayName}\nPincode: ${product.delivery_pincode}\n\nStock status: ${result.stockStatus}\n\n${product.url}\n\nPlace your order soon!\n\nLiked this service? Please give us a star on GitHub ⭐\nhttps://github.com/omshejul/check-amul-stock-frontend`;
-
-        const notificationPayload = {
-          phoneNumber: subscription.phone_number,
-          message,
-          imageUrl: product.image_url || result.imageUrl || null,
-          productName: productDisplayName,
-          productUrl: product.url
-        };
-
-        try {
-          await sendNotification(notificationPayload);
-          updateSubscriptionStatusStmt.run({ id: subscription.id, status: 'expired' });
-          expiredCount += 1;
-          log('green', `Notification dispatched to ${subscription.email} (${subscription.phone_number}) - subscription expired.`);
-
-          // Track successful stock notification in PostHog
-          track({
-            distinctId: subscription.email,
-            event: 'stock_available_notification_sent',
-            properties: {
-              productId,
-              subscriptionId: subscription.id,
-              productUrl: product.url,
-              deliveryPincode: product.delivery_pincode,
-              stockStatus: result.stockStatus
-            }
-          });
-
-          // Track subscription expired
-          track({
-            distinctId: subscription.email,
-            event: 'subscription_expired',
-            properties: {
-              productId,
-              subscriptionId: subscription.id,
-              reason: 'stock_became_available'
-            }
-          });
-        } catch (error) {
-          log('red', `Failed to send notification to ${subscription.email} (${subscription.phone_number}): ${error.message}`);
-
-          // Capture exception in PostHog
-          captureException(error, subscription.email, {
-            context: 'stock_notification',
-            productId,
-            subscriptionId: subscription.id
-          });
-
-          // Track failed notification in PostHog
-          track({
-            distinctId: subscription.email,
-            event: 'stock_notification_failed',
-            properties: {
-              productId,
-              subscriptionId: subscription.id,
-              error: error.message
-            }
-          });
-        }
-      }
-
-      if (expiredCount > 0) {
-        const remaining = countActiveSubscriptionsByProductStmt.get(productId).total;
-        if (remaining === 0) {
-          log('blue', `All subscriptions fulfilled for product ${productId}. Stopping monitor.`);
-          stopMonitor(productId);
-        }
-      }
-    } else if (previousStatus === 'IN STOCK') {
-      log('blue', `Product ${productId} back to OUT OF STOCK.`);
-    }
-  } catch (error) {
-    log('red', `Error monitoring product ${productId}: ${error.message}`);
-
-    // Capture exception in PostHog
-    captureException(error, `product_${productId}`, {
-      context: 'stock_check',
-      productId,
-      productUrl: product?.url
-    });
-
-    // Track stock check errors in PostHog
-    track({
-      distinctId: `product_${productId}`,
-      event: 'stock_check_error',
-      properties: {
-        productId,
-        error: error.message,
-        productUrl: product?.url
-      }
-    });
+    return { skipped: false, substores: groups.size, products: products.length };
   } finally {
-    monitor.isChecking = false;
-  }
-}
-
-function startMonitor(product) {
-  if (monitors.has(product.id)) {
-    // Track monitor reuse
-    track({
-      distinctId: `product_${product.id}`,
-      event: 'monitor_reused',
-      properties: {
-        productId: product.id,
-        productUrl: product.url,
-        deliveryPincode: product.delivery_pincode,
-        intervalMinutes: product.interval_minutes
-      }
-    });
-
-    return monitors.get(product.id);
-  }
-
-  const intervalMs = getIntervalMs(product.interval_minutes);
-  log('blue', `Starting monitor for product ${product.id} (${product.url}) every ${product.interval_minutes} minute(s).`);
-
-  // Track monitor start
-  track({
-    distinctId: `product_${product.id}`,
-    event: 'monitor_started',
-    properties: {
-      productId: product.id,
-      productUrl: product.url,
-      deliveryPincode: product.delivery_pincode,
-      intervalMinutes: product.interval_minutes,
-      intervalMs
-    }
-  });
-
-  const monitor = {
-    timer: setInterval(() => {
-      runProductCheck(product.id);
-    }, intervalMs),
-    isChecking: false,
-    lastStatus: null
-  };
-
-  monitors.set(product.id, monitor);
-
-  runProductCheck(product.id).catch((error) => {
-    log('red', `Initial check failed for product ${product.id}: ${error.message}`);
-
-    // Capture exception in PostHog
-    captureException(error, `product_${product.id}`, {
-      context: 'initial_stock_check',
-      productId: product.id,
-      productUrl: product.url
-    });
-
-    // Track initial check failures in PostHog
-    track({
-      distinctId: `product_${product.id}`,
-      event: 'initial_stock_check_failed',
-      properties: {
-        productId: product.id,
-        productUrl: product.url,
-        error: error.message
-      }
-    });
-  });
-
-  return monitor;
-}
-
-function stopMonitor(productId) {
-  const monitor = monitors.get(productId);
-  if (monitor) {
-    clearInterval(monitor.timer);
-    monitors.delete(productId);
-    log('blue', `Stopped monitor for product ${productId}.`);
-
-    // Track monitor stop
-    track({
-      distinctId: `product_${productId}`,
-      event: 'monitor_stopped',
-      properties: {
-        productId,
-        reason: 'no_active_subscriptions'
-      }
-    });
+    checkRunning = false;
   }
 }
 
 function initExistingMonitors() {
-  const products = selectProductsWithActiveSubscriptionsStmt.all();
-
-  // Track monitor initialization
-  track({
-    distinctId: 'system',
-    event: 'monitors_initialized',
-    properties: {
-      monitorCount: products.length,
-      timestamp: new Date().toISOString()
-    }
+  if (catalogTask) return catalogTask;
+  catalogTask = cron.schedule('* * * * *', () => runCatalogCheck(), {
+    name: 'amul-catalog-check',
+    timezone: 'Asia/Kolkata',
+    noOverlap: true
   });
-
-  products.forEach((product) => startMonitor(product));
+  const count = selectProductsWithActiveSubscriptionsStmt.all().length;
+  log('blue', `Catalog monitor started: ${count} active product(s), one request per substore per minute.`);
+  track({ distinctId: 'system', event: 'monitors_initialized', properties: { monitorCount: count } });
+  runCatalogCheck().catch((error) => log('red', `Initial catalog check failed: ${error.message}`));
+  return catalogTask;
 }
 
-async function addSubscription({ productUrl, deliveryPincode, intervalMinutes = 5, phoneNumber, email }) {
+async function addSubscription({ productUrl, deliveryPincode, phoneNumber, email }) {
   if (!productUrl || !deliveryPincode || !phoneNumber || !email) {
     throw new Error('productUrl, deliveryPincode, phoneNumber, and email are required');
   }
-
-  const interval = Number.parseInt(intervalMinutes, 10) || 5;
-
-  const productPayload = {
-    url: productUrl,
-    delivery_pincode: deliveryPincode,
-    interval_minutes: interval
-  };
-
-  // Check if product already exists
-  const existingProduct = selectProductStmt.get(productUrl, deliveryPincode, interval);
-  const isNewProduct = !existingProduct;
-
-  // Check if subscription already exists
-  let existingSubscription = null;
-  if (existingProduct) {
-    existingSubscription = selectSubscriptionStmt.get(existingProduct.id, email);
+  const url = new URL(productUrl);
+  if (url.hostname !== 'shop.amul.com' || !url.pathname.toLowerCase().includes('/product/')) {
+    throw new Error('productUrl must be an Amul product URL');
   }
-  const isReactivation = existingSubscription && existingSubscription.status !== 'active';
 
+  const existingProduct = selectProductStmt.get(productUrl, deliveryPincode);
+  const existingSubscription = existingProduct ? selectSubscriptionStmt.get(existingProduct.id, email) : null;
   const transaction = db.transaction(() => {
-    insertProductStmt.run(productPayload);
-    const product = selectProductStmt.get(productUrl, deliveryPincode, interval);
-    if (!product) {
-      throw new Error('Failed to create or retrieve product record');
-    }
-
-    insertSubscriptionStmt.run({
-      product_id: product.id,
-      email,
-      phone_number: phoneNumber
-    });
-
-    const subscription = selectSubscriptionStmt.get(product.id, email);
-    return { product, subscription };
+    insertProductStmt.run({ url: productUrl, delivery_pincode: deliveryPincode });
+    const product = selectProductStmt.get(productUrl, deliveryPincode);
+    insertSubscriptionStmt.run({ product_id: product.id, email, phone_number: phoneNumber });
+    return { product, subscription: selectSubscriptionStmt.get(product.id, email) };
   });
-
   const { product, subscription } = transaction();
 
-  // If product metadata is missing, fetch it now
-  if (!product.product_name || !product.image_url) {
-    log('blue', `Fetching product metadata for ${product.url}...`);
-    try {
-      const result = await checkProductStock({
-        productUrl: product.url,
-        deliveryPincode: product.delivery_pincode
-      });
-
-      if (result.productName || result.imageUrl) {
-        updateProductMetadataStmt.run({
-          id: product.id,
-          product_name: result.productName || null,
-          image_url: result.imageUrl || null
-        });
-
-        // Refresh product data
-        const updatedProduct = selectProductByIdStmt.get(product.id);
-        Object.assign(product, updatedProduct);
-
-        log('green', `✓ Product metadata fetched`);
-      }
-    } catch (error) {
-      log('yellow', `Could not fetch product metadata: ${error.message}`);
-    }
-  }
-
-  // Track product creation or reuse
-  if (isNewProduct) {
-    track({
-      distinctId: email,
-      event: 'product_created',
-      properties: {
-        productId: product.id,
-        productUrl,
-        deliveryPincode,
-        intervalMinutes: interval
-      }
-    });
-  } else {
-    track({
-      distinctId: email,
-      event: 'product_reused',
-      properties: {
-        productId: product.id,
-        productUrl,
-        deliveryPincode,
-        intervalMinutes: interval
-      }
-    });
-  }
-
-  // Track subscription reactivation
-  if (isReactivation) {
+  track({
+    distinctId: email,
+    event: existingProduct ? 'product_reused' : 'product_created',
+    properties: { productId: product.id, productUrl, deliveryPincode, intervalMinutes: 1 }
+  });
+  if (existingSubscription && existingSubscription.status !== 'active') {
     track({
       distinctId: email,
       event: 'subscription_reactivated',
-      properties: {
-        subscriptionId: subscription.id,
-        productId: product.id,
-        previousStatus: existingSubscription.status
-      }
+      properties: { subscriptionId: subscription.id, productId: product.id, previousStatus: existingSubscription.status }
     });
   }
 
-  startMonitor(product);
-
-  const productDisplayName = product.product_name || 'Product';
-  const confirmationMessage = `✅ Subscription active!\n\nProduct: ${productDisplayName}\nPincode: ${product.delivery_pincode}\nFrequency: every ${product.interval_minutes} minute(s)\n\n${product.url}\n\nYou'll receive an alert as soon as stock is available.`;
-
-  const confirmationPayload = {
-    phoneNumber: subscription.phone_number,
-    message: confirmationMessage,
-    imageUrl: product.image_url || null,
-    productName: productDisplayName,
-    productUrl: product.url
-  };
-
+  const productName = product.product_name || 'Product';
   try {
-    await sendNotification(confirmationPayload);
-    log('green', `Confirmation notification sent to ${subscription.email} (${subscription.phone_number}).`);
-
-    // Track successful confirmation notification
-    track({
-      distinctId: email,
-      event: 'confirmation_notification_sent',
-      properties: {
-        subscriptionId: subscription.id,
-        productId: product.id
-      }
+    await sendNotification({
+      phoneNumber: subscription.phone_number,
+      message: `✅ Subscription active!\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\nFrequency: every minute\n\n${product.url}\n\nYou'll receive an alert as soon as stock is available.`,
+      imageUrl: product.image_url || null,
+      productName,
+      productUrl: product.url
     });
+    track({ distinctId: email, event: 'confirmation_notification_sent', properties: { subscriptionId: subscription.id, productId: product.id } });
   } catch (error) {
-    log('red', `Failed to send confirmation notification to ${subscription.email} (${subscription.phone_number}): ${error.message}`);
-
-    // Capture exception in PostHog
-    captureException(error, email, {
-      context: 'confirmation_notification',
-      subscriptionId: subscription.id,
-      productId: product.id
-    });
-
-    // Track failed confirmation notification
-    track({
-      distinctId: email,
-      event: 'confirmation_notification_failed',
-      properties: {
-        subscriptionId: subscription.id,
-        productId: product.id,
-        error: error.message
-      }
-    });
+    log('red', `Failed confirmation notification for ${email}: ${error.message}`);
+    captureException(error, email, { context: 'confirmation_notification', subscriptionId: subscription.id, productId: product.id });
   }
 
   return {
@@ -611,37 +268,15 @@ async function addSubscription({ productUrl, deliveryPincode, intervalMinutes = 
 
 function deleteSubscription(subscriptionId) {
   const subscription = selectSubscriptionByIdStmt.get(subscriptionId);
-  if (!subscription) {
-    return { removed: false };
-  }
-
-  if (subscription.status === 'deleted') {
-    return { removed: false };
-  }
-
+  if (!subscription || subscription.status === 'deleted') return { removed: false };
   updateSubscriptionStatusStmt.run({ id: subscriptionId, status: 'deleted' });
-
   const updated = selectSubscriptionByIdStmt.get(subscriptionId);
-
-  const remaining = countActiveSubscriptionsByProductStmt.get(subscription.product_id).total;
-  if (remaining === 0) {
-    stopMonitor(subscription.product_id);
-  }
-
   return { removed: true, email: subscription.email, status: updated.status, statusChangedAt: updated.status_changed_at };
 }
 
 function getSubscriptionsByEmail(email) {
-  if (!email) {
-    throw new Error('email is required');
-  }
-
+  if (!email) throw new Error('email is required');
   return selectSubscriptionsByEmailStmt.all(email);
 }
 
-module.exports = {
-  initExistingMonitors,
-  addSubscription,
-  deleteSubscription,
-  getSubscriptionsByEmail
-};
+module.exports = { initExistingMonitors, runCatalogCheck, addSubscription, deleteSubscription, getSubscriptionsByEmail };
