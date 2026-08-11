@@ -3,8 +3,12 @@ const db = require('./db');
 const { AmulCatalogPool, findProduct, getInventoryQuantity, getProductImageUrl, isAvailableToPurchase } = require('./amulCatalog');
 const { sendNotification } = require('./notification');
 const { track, captureException } = require('./analytics');
+const { trace, SpanStatusCode } = require('@opentelemetry/api');
+const { log, recordError, safeError } = require('./observability');
+const { catalogRuns, catalogDuration, catalogRequests, activeProducts, lastSuccessfulRun, errors } = require('./metrics');
 
 const catalogPool = new AmulCatalogPool();
+const tracer = trace.getTracer('amul-stock-checker-monitor');
 let catalogTask = null;
 let checkRunning = false;
 
@@ -60,11 +64,6 @@ const updateProductCatalogStmt = db.prepare(`
 `);
 const updateProductSubstoreStmt = db.prepare('UPDATE products SET substore = ? WHERE id = ?');
 
-function log(level, message) {
-  const colors = { green: '\x1b[32m', red: '\x1b[31m', yellow: '\x1b[33m', blue: '\x1b[34m' };
-  console.log(`${colors[level] || ''}${message}\x1b[0m`);
-}
-
 async function notifyAvailableSubscriptions(product, catalogProduct, notificationSender) {
   const subscriptions = selectActiveSubscriptionsByProductStmt.all(product.id);
   const productName = catalogProduct.name || product.product_name || 'Product';
@@ -81,7 +80,7 @@ async function notifyAvailableSubscriptions(product, catalogProduct, notificatio
         productUrl: product.url
       });
       updateSubscriptionStatusStmt.run({ id: subscription.id, status: 'expired' });
-      log('green', `Stock alert sent to ${subscription.email}; subscription expired.`);
+      log('info', 'stock_alert_sent', { product_id: product.id, subscription_id: subscription.id });
       track({
         distinctId: subscription.email,
         event: 'stock_available_notification_sent',
@@ -93,14 +92,15 @@ async function notifyAvailableSubscriptions(product, catalogProduct, notificatio
         properties: { productId: product.id, subscriptionId: subscription.id, reason: 'stock_became_available' }
       });
     } catch (error) {
-      log('red', `Failed stock alert for ${subscription.email}: ${error.message}`);
+      errors.inc({ operation: 'stock_notification' });
+      recordError(error, 'stock_notification', { product_id: product.id, subscription_id: subscription.id });
       captureException(error, subscription.email, {
         context: 'stock_notification', productId: product.id, subscriptionId: subscription.id
       });
       track({
         distinctId: subscription.email,
         event: 'stock_notification_failed',
-        properties: { productId: product.id, subscriptionId: subscription.id, error: error.message }
+        properties: { productId: product.id, subscriptionId: subscription.id, errorType: safeError(error).type }
       });
     }
   }
@@ -108,12 +108,16 @@ async function notifyAvailableSubscriptions(product, catalogProduct, notificatio
 
 async function runCatalogCheck({ pool = catalogPool, notificationSender = sendNotification } = {}) {
   if (checkRunning) {
-    log('yellow', 'Skipping minute check because the previous run is still active.');
+    log('warn', 'catalog_check_skipped', { reason: 'previous_run_active' });
+    catalogRuns.inc({ status: 'skipped' });
     return { skipped: true, substores: 0, products: 0 };
   }
 
   checkRunning = true;
+  const stopTimer = catalogDuration.startTimer();
+  let runStatus = 'success';
   const products = selectProductsWithActiveSubscriptionsStmt.all();
+  activeProducts.set(products.length);
   const groups = new Map();
 
   try {
@@ -125,21 +129,38 @@ async function runCatalogCheck({ pool = catalogPool, notificationSender = sendNo
         if (!groups.has(substore)) groups.set(substore, { client, products: [] });
         groups.get(substore).products.push(product);
       } catch (error) {
-        log('red', `Could not resolve pincode ${product.delivery_pincode}: ${error.message}`);
+        runStatus = 'partial_failure';
+        errors.inc({ operation: 'substore_resolution' });
+        recordError(error, 'substore_resolution', { product_id: product.id });
         captureException(error, `product_${product.id}`, { context: 'substore_resolution', productId: product.id });
       }
     }
 
     for (const [substore, group] of groups) {
       try {
-        const payload = await group.client.fetchCatalog();
+        const payload = await tracer.startActiveSpan('amul.catalog.fetch', {
+          attributes: { 'amul.substore': substore }
+        }, async (span) => {
+          try {
+            const result = await group.client.fetchCatalog();
+            catalogRequests.inc({ status: 'success' });
+            return result;
+          } catch (error) {
+            catalogRequests.inc({ status: 'error' });
+            span.recordException(safeError(error));
+            span.setStatus({ code: SpanStatusCode.ERROR, message: safeError(error).message });
+            throw error;
+          } finally {
+            span.end();
+          }
+        });
         const catalog = payload.data;
-        log('blue', `Fetched ${catalog.length} products for ${substore}; checking ${group.products.length} tracked product(s).`);
+        log('info', 'catalog_fetched', { substore, catalog_products: catalog.length, tracked_products: group.products.length });
 
         for (const product of group.products) {
           const catalogProduct = findProduct(catalog, { sku: product.amul_product_id, url: product.url });
           if (!catalogProduct) {
-            log('yellow', `Tracked product ${product.id} was not present in the ${substore} catalog.`);
+            log('warn', 'tracked_product_missing_from_catalog', { product_id: product.id, substore });
             continue;
           }
 
@@ -176,8 +197,10 @@ async function runCatalogCheck({ pool = catalogPool, notificationSender = sendNo
           }
         }
       } catch (error) {
+        runStatus = 'partial_failure';
         pool.invalidate(substore);
-        log('red', `Catalog check failed for ${substore}: ${error.message}`);
+        errors.inc({ operation: 'catalog_check' });
+        recordError(error, 'catalog_check', { substore });
         captureException(error, `substore_${substore}`, { context: 'catalog_check', substore });
       }
     }
@@ -187,8 +210,11 @@ async function runCatalogCheck({ pool = catalogPool, notificationSender = sendNo
       event: 'catalog_check_completed',
       properties: { substoreCount: groups.size, productCount: products.length }
     });
+    if (runStatus === 'success') lastSuccessfulRun.setToCurrentTime();
     return { skipped: false, substores: groups.size, products: products.length };
   } finally {
+    catalogRuns.inc({ status: runStatus });
+    stopTimer({ status: runStatus });
     checkRunning = false;
   }
 }
@@ -201,9 +227,13 @@ function initExistingMonitors() {
     noOverlap: true
   });
   const count = selectProductsWithActiveSubscriptionsStmt.all().length;
-  log('blue', `Catalog monitor started: ${count} active product(s), one request per substore per minute.`);
+  activeProducts.set(count);
+  log('info', 'catalog_monitor_started', { active_products: count, schedule: 'one_request_per_substore_per_minute' });
   track({ distinctId: 'system', event: 'monitors_initialized', properties: { monitorCount: count } });
-  runCatalogCheck().catch((error) => log('red', `Initial catalog check failed: ${error.message}`));
+  runCatalogCheck().catch((error) => {
+    errors.inc({ operation: 'initial_catalog_check' });
+    recordError(error, 'initial_catalog_check');
+  });
   return catalogTask;
 }
 
@@ -250,7 +280,8 @@ async function addSubscription({ productUrl, deliveryPincode, phoneNumber, email
     });
     track({ distinctId: email, event: 'confirmation_notification_sent', properties: { subscriptionId: subscription.id, productId: product.id } });
   } catch (error) {
-    log('red', `Failed confirmation notification for ${email}: ${error.message}`);
+    errors.inc({ operation: 'confirmation_notification' });
+    recordError(error, 'confirmation_notification', { product_id: product.id, subscription_id: subscription.id });
     captureException(error, email, { context: 'confirmation_notification', subscriptionId: subscription.id, productId: product.id });
   }
 

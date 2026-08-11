@@ -1,5 +1,4 @@
 const express = require('express');
-const { setupExpressErrorHandler } = require('posthog-node');
 const { server: serverConfig, posthog: posthogConfig } = require('./config');
 const {
   initExistingMonitors,
@@ -7,11 +6,15 @@ const {
   deleteSubscription,
   getSubscriptionsByEmail
 } = require('./monitorManager');
-const { initPostHog, track, captureException, shutdown: shutdownPostHog, getClient } = require('./analytics');
+const { initPostHog, track, captureException, shutdown: shutdownPostHog } = require('./analytics');
+const { shutdownTelemetry } = require('./telemetry');
+const { log, recordError, safeError } = require('./observability');
+const { register, requestMetrics, errors } = require('./metrics');
 
 const app = express();
 
 app.use(express.json());
+app.use(requestMetrics);
 
 // Bearer token authentication middleware
 function authenticateApiKey(req, res, next) {
@@ -83,6 +86,11 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', register.contentType);
+  res.send(await register.metrics());
+});
+
 app.post('/checks', authenticateApiKey, async (req, res) => {
   const { productUrl, deliveryPincode, phoneNumber, email } = req.body || {};
 
@@ -130,13 +138,12 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Failed to create subscription:', error);
+    errors.inc({ operation: 'subscription_create' });
+    recordError(error, 'subscription_create');
 
     // Capture exception in PostHog
     captureException(error, email || 'unknown', {
-      context: 'subscription_creation',
-      productUrl,
-      deliveryPincode
+      context: 'subscription_creation'
     });
 
     // Track error event in PostHog
@@ -144,14 +151,13 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
       distinctId: email || 'unknown',
       event: 'subscription_creation_failed',
       properties: {
-        error: error.message,
-        productUrl
+        errorType: safeError(error).type
       }
     });
 
     return res.status(500).json({
       error: 'Failed to create subscription',
-      details: error.message
+      details: 'Please try again later'
     });
   }
 });
@@ -177,8 +183,9 @@ app.get('/subscriptions', authenticateApiKey, (req, res) => {
 
     return res.json({ email, subscriptions });
   } catch (error) {
-    console.error('Failed to fetch subscriptions:', error);
-    return res.status(500).json({ error: 'Failed to fetch subscriptions', details: error.message });
+    errors.inc({ operation: 'subscriptions_fetch' });
+    recordError(error, 'subscriptions_fetch');
+    return res.status(500).json({ error: 'Failed to fetch subscriptions' });
   }
 });
 
@@ -207,10 +214,11 @@ app.delete('/checks/:subscriptionId', authenticateApiKey, (req, res) => {
 
     return res.json({ message: 'Subscription removed', status: result.status, statusChangedAt: result.statusChangedAt });
   } catch (error) {
-    console.error('Failed to delete subscription:', error);
+    errors.inc({ operation: 'subscription_delete' });
+    recordError(error, 'subscription_delete');
     return res.status(500).json({
       error: 'Failed to delete subscription',
-      details: error.message
+      details: 'Please try again later'
     });
   }
 });
@@ -218,13 +226,6 @@ app.delete('/checks/:subscriptionId', authenticateApiKey, (req, res) => {
 function startServer() {
   // Initialize PostHog (optional)
   initPostHog(posthogConfig);
-
-  // Setup Express error handler for PostHog exception autocapture
-  const posthogClient = getClient();
-  if (posthogClient) {
-    setupExpressErrorHandler(posthogClient, app);
-    console.log('📊 PostHog: Express error handler configured');
-  }
 
   // Track server startup
   track({
@@ -239,13 +240,13 @@ function startServer() {
 
   initExistingMonitors();
 
-  app.listen(serverConfig.port, () => {
-    console.log(`🚀 Stock checker service listening on port ${serverConfig.port}`);
+  const httpServer = app.listen(serverConfig.port, () => {
+    log('info', 'server_started', { port: serverConfig.port, node_version: process.version });
   });
 
   // Handle graceful shutdown
   const gracefulShutdown = async (signal) => {
-    console.log(`\n${signal} received. Shutting down gracefully...`);
+    log('info', 'server_shutdown_started', { signal });
 
     // Track server shutdown
     track({
@@ -257,14 +258,23 @@ function startServer() {
       }
     });
 
-    // Give PostHog time to flush events
-    await shutdownPostHog();
+    await new Promise((resolve) => httpServer.close(resolve));
+    await Promise.allSettled([shutdownPostHog(), shutdownTelemetry()]);
 
     process.exit(0);
   };
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+  const fatal = async (kind, error) => {
+    errors.inc({ operation: kind });
+    recordError(error, kind);
+    await Promise.allSettled([shutdownPostHog(), shutdownTelemetry()]);
+    process.exit(1);
+  };
+  process.on('uncaughtException', (error) => fatal('uncaught_exception', error));
+  process.on('unhandledRejection', (error) => fatal('unhandled_rejection', error));
 }
 
 module.exports = {

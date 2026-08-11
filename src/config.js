@@ -9,8 +9,12 @@ const REQUIRED_ENV_VARS = [
 const missing = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
 
 if (missing.length > 0) {
-  console.error('❌ Missing required environment variables:');
-  missing.forEach((key) => console.error(` - ${key}`));
+  process.stderr.write(`${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    level: 'fatal',
+    message: 'required_environment_missing',
+    variable_names: missing
+  })}\n`);
   process.exit(1);
 }
 

@@ -1,4 +1,5 @@
 const { PostHog } = require('posthog-node');
+const { log, safeError } = require('./observability');
 
 let posthogClient = null;
 let isEnabled = false;
@@ -11,7 +12,7 @@ let isEnabled = false;
  */
 function initPostHog(config) {
     if (!config || !config.apiKey) {
-        console.log('📊 PostHog: Not configured (optional)');
+        log('info', 'posthog_not_configured');
         return;
     }
 
@@ -23,9 +24,9 @@ function initPostHog(config) {
             enableExceptionAutocapture: true // Auto-capture exceptions
         });
         isEnabled = true;
-        console.log('📊 PostHog: Initialized successfully');
+        log('info', 'posthog_initialized');
     } catch (error) {
-        console.error('⚠️ PostHog: Failed to initialize:', error.message);
+        log('warn', 'posthog_initialization_failed', { error_type: safeError(error).type });
     }
 }
 
@@ -48,7 +49,7 @@ function track({ distinctId, event, properties = {} }) {
             properties,
         });
     } catch (error) {
-        console.error('⚠️ PostHog: Failed to track event:', error.message);
+        log('warn', 'posthog_event_failed', { error_type: safeError(error).type });
     }
 }
 
@@ -66,7 +67,7 @@ function captureException(error, distinctId = 'system', additionalProperties = {
     try {
         posthogClient.captureException(error, distinctId, additionalProperties);
     } catch (err) {
-        console.error('⚠️ PostHog: Failed to capture exception:', err.message);
+        log('warn', 'posthog_exception_capture_failed', { error_type: safeError(err).type });
     }
 }
 
@@ -78,7 +79,7 @@ async function flush() {
         try {
             await posthogClient.flush();
         } catch (error) {
-            console.error('⚠️ PostHog: Error during flush:', error.message);
+            log('warn', 'posthog_flush_failed', { error_type: safeError(error).type });
         }
     }
 }
@@ -90,9 +91,9 @@ async function shutdown() {
     if (posthogClient) {
         try {
             await posthogClient.shutdown();
-            console.log('📊 PostHog: Shut down successfully');
+            log('info', 'posthog_shutdown');
         } catch (error) {
-            console.error('⚠️ PostHog: Error during shutdown:', error.message);
+            log('warn', 'posthog_shutdown_failed', { error_type: safeError(error).type });
         }
     }
 }
@@ -113,4 +114,3 @@ module.exports = {
     getClient,
     isEnabled: () => isEnabled,
 };
-

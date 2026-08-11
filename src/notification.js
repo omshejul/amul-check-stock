@@ -1,13 +1,7 @@
 const axios = require('axios');
 const { notification } = require('./config');
 
-const COLORS = {
-  green: '\x1b[32m',
-  red: '\x1b[31m',
-  yellow: '\x1b[33m',
-  blue: '\x1b[34m',
-  reset: '\x1b[0m'
-};
+const { log } = require('./observability');
 
 async function sendNotification({ phoneNumber, message }) {
   try {
@@ -28,12 +22,8 @@ async function sendNotification({ phoneNumber, message }) {
       }
     );
 
-    console.log(`${COLORS.green}✓ Notification sent to ${phoneNumber}${COLORS.reset}`);
+    log('info', 'notification_sent', { provider: 'whatsapp' });
   } catch (error) {
-    console.error(`${COLORS.red}Error sending notification to ${phoneNumber}:${COLORS.reset}`, error.message);
-    if (error.response) {
-      console.error(`${COLORS.yellow}Response: ${JSON.stringify(error.response.data)}${COLORS.reset}`);
-    }
     throw error;
   }
 }
@@ -41,4 +31,3 @@ async function sendNotification({ phoneNumber, message }) {
 module.exports = {
   sendNotification
 };
-
