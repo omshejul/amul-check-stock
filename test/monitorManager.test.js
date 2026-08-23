@@ -63,6 +63,7 @@ test('fetches one catalog per substore and evaluates every tracked product', asy
 test('expires a subscription only after its stock notification succeeds', async () => {
   const product = db.prepare('SELECT * FROM products ORDER BY id LIMIT 1').get();
   let notifications = 0;
+  let notificationMessage = '';
   const client = {
     pincodeRecord: { pincode: '560034', substore: 'karnataka' },
     async fetchCatalog() {
@@ -81,10 +82,14 @@ test('expires a subscription only after its stock notification succeeds', async 
 
   await runCatalogCheck({
     pool,
-    notificationSender: async () => { notifications += 1; }
+    notificationSender: async ({ message }) => {
+      notifications += 1;
+      notificationMessage = message;
+    }
   });
 
   assert.equal(notifications, 1);
+  assert.doesNotMatch(notificationMessage, /star|github/i);
   assert.equal(
     db.prepare('SELECT status FROM subscriptions WHERE product_id = ?').get(product.id).status,
     'expired'

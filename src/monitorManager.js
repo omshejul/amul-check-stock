@@ -70,7 +70,7 @@ async function notifyAvailableSubscriptions(product, catalogProduct, notificatio
   const imageUrl = product.image_url || getProductImageUrl(catalogProduct) || null;
 
   for (const subscription of subscriptions) {
-    const message = `🎉 Stock Available! 🎉\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\n\nStock status: IN STOCK\n\n${product.url}\n\nPlace your order soon!\n\nLiked this service? Please give us a star on GitHub ⭐\nhttps://github.com/omshejul/check-amul-stock-frontend`;
+    const message = `🎉 Stock Available! 🎉\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\n\nStock status: IN STOCK\n\n${product.url}\n\nPlace your order soon!`;
     try {
       await notificationSender({
         phoneNumber: subscription.phone_number,
