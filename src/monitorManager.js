@@ -155,6 +155,7 @@ async function runCatalogCheck({ pool = catalogPool, notificationSender = sendNo
           }
         });
         const catalog = payload.data;
+        if (catalog.length === 0) throw new Error('Amul product catalog was empty');
         log('info', 'catalog_fetched', { substore, catalog_products: catalog.length, tracked_products: group.products.length });
 
         for (const product of group.products) {

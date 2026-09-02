@@ -95,3 +95,40 @@ test('expires a subscription only after its stock notification succeeds', async 
     'expired'
   );
 });
+
+test('invalidates the substore session when Amul returns an empty catalog', async () => {
+  const productId = db.prepare(`
+    INSERT INTO products (url, delivery_pincode, interval_minutes)
+    VALUES (?, '560084', 1)
+  `).run('https://shop.amul.com/en/product/empty-catalog-product').lastInsertRowid;
+  db.prepare(`
+    INSERT INTO subscriptions (product_id, email, phone_number) VALUES (?, ?, ?)
+  `).run(productId, 'empty@example.com', '+913333333333');
+
+  let invalidatedSubstore = null;
+  let notifications = 0;
+  const client = {
+    pincodeRecord: { pincode: '560084', substore: 'karnataka' },
+    async fetchCatalog() { return { data: [] }; }
+  };
+  const pool = {
+    async getForPincode() { return client; },
+    invalidate(substore) { invalidatedSubstore = substore; }
+  };
+
+  await runCatalogCheck({
+    pool,
+    notificationSender: async () => { notifications += 1; }
+  });
+
+  assert.equal(invalidatedSubstore, 'karnataka');
+  assert.equal(notifications, 0);
+  assert.deepEqual(
+    db.prepare('SELECT last_stock_status, last_checked_at FROM products WHERE id = ?').get(productId),
+    { last_stock_status: null, last_checked_at: null }
+  );
+  assert.equal(
+    db.prepare('SELECT status FROM subscriptions WHERE product_id = ?').get(productId).status,
+    'active'
+  );
+});
