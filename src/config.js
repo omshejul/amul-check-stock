@@ -21,6 +21,7 @@ if (missing.length > 0) {
 module.exports = {
   notification: {
     apiUrl: process.env.NOTIFICATION_API_URL,
+    verificationUrl: process.env.WHATSAPP_VERIFICATION_URL,
     apiKey: process.env.NOTIFICATION_API_KEY
   },
   server: {

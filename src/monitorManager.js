@@ -1,7 +1,7 @@
 const cron = require('node-cron');
 const db = require('./db');
 const { AmulCatalogPool, findProduct, getInventoryQuantity, getProductImageUrl, isAvailableToPurchase } = require('./amulCatalog');
-const { sendNotification } = require('./notification');
+const { sendNotification, verifyWhatsAppNumber } = require('./notification');
 const { track, captureException } = require('./analytics');
 const { trace, SpanStatusCode } = require('@opentelemetry/api');
 const { log, recordError, safeError } = require('./observability');
@@ -247,6 +247,7 @@ async function addSubscription({ productUrl, deliveryPincode, phoneNumber, email
     throw new Error('productUrl must be an Amul product URL');
   }
 
+  phoneNumber = await verifyWhatsAppNumber(phoneNumber);
   const existingProduct = selectProductStmt.get(productUrl, deliveryPincode);
   const existingSubscription = existingProduct ? selectSubscriptionStmt.get(existingProduct.id, email) : null;
   const transaction = db.transaction(() => {

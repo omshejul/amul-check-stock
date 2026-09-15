@@ -1,4 +1,5 @@
 const express = require('express');
+const { PhoneVerificationError } = require('./notification');
 const { server: serverConfig, posthog: posthogConfig } = require('./config');
 const {
   initExistingMonitors,
@@ -138,6 +139,14 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
       }
     });
   } catch (error) {
+    if (error instanceof PhoneVerificationError) {
+      if (error.statusCode === 503) {
+        errors.inc({ operation: 'phone_verification' });
+        recordError(error, 'phone_verification');
+        res.set('Retry-After', '30');
+      }
+      return res.status(error.statusCode).json({ error: error.message, code: error.code });
+    }
     errors.inc({ operation: 'subscription_create' });
     recordError(error, 'subscription_create');
 

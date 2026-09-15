@@ -37,6 +37,7 @@ Required environment variables:
 ```env
 NOTIFICATION_API_URL=https://example.com/message/sendText/bot
 NOTIFICATION_API_KEY=your-notification-key
+WHATSAPP_VERIFICATION_URL=https://your-evolution-host/chat/whatsappNumbers/bot
 API_KEY=your-api-bearer-token
 PORT=3000
 ```
@@ -69,6 +70,11 @@ curl -X POST http://localhost:3000/checks \
 ```
 
 All alerts are checked every minute. `intervalMinutes` from older clients is accepted but ignored.
+
+New and reactivated alerts require a verified WhatsApp number. Verification uses
+`WHATSAPP_VERIFICATION_URL` with `NOTIFICATION_API_KEY` before saving anything.
+Unregistered numbers return HTTP 400; unavailable verification returns HTTP 503
+with `Retry-After: 30`. Numbers are stored with a leading `+` and country code.
 
 ### List alerts
 
