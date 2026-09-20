@@ -275,7 +275,7 @@ async function addSubscription({ productUrl, deliveryPincode, phoneNumber, email
   try {
     await sendNotification({
       phoneNumber: subscription.phone_number,
-      message: `✅ Subscription active!\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\nFrequency: every minute\n\n${product.url}\n\nYou'll receive an alert as soon as stock is available.\n\namul.omshejul.com`,
+      message: `✅ Subscription active!\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\nFrequency: every minute\n\n${product.url}\n\nYou'll receive an alert as soon as stock is available.\n\nManage your alerts at amul.omshejul.com`,
       imageUrl: product.image_url || null,
       productName,
       productUrl: product.url
