@@ -70,7 +70,7 @@ async function notifyAvailableSubscriptions(product, catalogProduct, notificatio
   const imageUrl = product.image_url || getProductImageUrl(catalogProduct) || null;
 
   for (const subscription of subscriptions) {
-    const message = `🎉 Stock Available! 🎉\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\n\nStock status: IN STOCK\n\n${product.url}\n\nPlace your order soon!`;
+    const message = `🎉 Stock Available! 🎉\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\n\nStock status: IN STOCK\n\n${product.url}\n\nPlace your order soon!\n\namul.omshejul.com`;
     try {
       await notificationSender({
         phoneNumber: subscription.phone_number,
@@ -275,7 +275,7 @@ async function addSubscription({ productUrl, deliveryPincode, phoneNumber, email
   try {
     await sendNotification({
       phoneNumber: subscription.phone_number,
-      message: `✅ Subscription active!\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\nFrequency: every minute\n\n${product.url}\n\nYou'll receive an alert as soon as stock is available.`,
+      message: `✅ Subscription active!\n\nProduct: ${productName}\nPincode: ${product.delivery_pincode}\nFrequency: every minute\n\n${product.url}\n\nYou'll receive an alert as soon as stock is available.\n\namul.omshejul.com`,
       imageUrl: product.image_url || null,
       productName,
       productUrl: product.url
