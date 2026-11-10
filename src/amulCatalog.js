@@ -30,6 +30,15 @@ const DEFAULT_HEADERS = {
   'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
 };
 
+class PincodeUnavailableError extends Error {
+  constructor(pincode, { cached = false } = {}) {
+    super(`No Amul delivery area found for pincode ${pincode}`);
+    this.name = 'PincodeUnavailableError';
+    this.pincode = String(pincode);
+    this.cached = cached;
+  }
+}
+
 function parseJson(body, name) {
   try { return JSON.parse(body); } catch { throw new Error(`${name} returned invalid JSON`); }
 }
@@ -110,7 +119,7 @@ class AmulCatalogClient {
     this.tid = session.tid;
 
     const records = await this.searchPincode(pincode);
-    if (!records.length) throw new Error(`No Amul delivery area found for pincode ${pincode}`);
+    if (!records.length) throw new PincodeUnavailableError(pincode);
     const record = records.find((item) => String(item.pincode) === String(pincode)) || records[0];
     if (!substores[record.substore]) throw new Error(`Unknown Amul substore alias: ${record.substore}`);
     await this.setPincode(record);
@@ -189,17 +198,40 @@ class AmulCatalogClient {
 }
 
 class AmulCatalogPool {
-  constructor() {
+  constructor({
+    clientFactory = () => new AmulCatalogClient(),
+    now = Date.now,
+    unavailableRetryMs = 60 * 60 * 1000
+  } = {}) {
     this.sessions = new Map();
     this.pincodeSubstores = new Map();
+    this.unavailablePincodes = new Map();
+    this.clientFactory = clientFactory;
+    this.now = now;
+    this.unavailableRetryMs = unavailableRetryMs;
   }
 
   async getForPincode(pincode, knownSubstore) {
-    const cachedSubstore = knownSubstore || this.pincodeSubstores.get(String(pincode));
+    const key = String(pincode);
+    const retryAt = this.unavailablePincodes.get(key);
+    if (retryAt && this.now() < retryAt) {
+      throw new PincodeUnavailableError(key, { cached: true });
+    }
+    if (retryAt) this.unavailablePincodes.delete(key);
+
+    const cachedSubstore = knownSubstore || this.pincodeSubstores.get(key);
     if (cachedSubstore && this.sessions.has(cachedSubstore)) return this.sessions.get(cachedSubstore);
-    const client = await new AmulCatalogClient().init(pincode);
+    let client;
+    try {
+      client = await this.clientFactory().init(pincode);
+    } catch (error) {
+      if (error instanceof PincodeUnavailableError) {
+        this.unavailablePincodes.set(key, this.now() + this.unavailableRetryMs);
+      }
+      throw error;
+    }
     const substore = client.pincodeRecord.substore;
-    this.pincodeSubstores.set(String(pincode), substore);
+    this.pincodeSubstores.set(key, substore);
     const existing = this.sessions.get(substore);
     if (existing) return existing;
     this.sessions.set(substore, client);
@@ -217,6 +249,7 @@ class AmulCatalogPool {
 module.exports = {
   AmulCatalogClient,
   AmulCatalogPool,
+  PincodeUnavailableError,
   extractProductAlias,
   findProduct,
   getInventoryQuantity,

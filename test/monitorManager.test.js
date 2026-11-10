@@ -11,11 +11,24 @@ process.env.NOTIFICATION_API_KEY = 'test';
 process.env.API_KEY = 'test';
 
 const db = require('../src/db');
-const { runCatalogCheck } = require('../src/monitorManager');
+const { runCatalogCheck, addSubscription } = require('../src/monitorManager');
 
 test.after(() => {
   db.close();
   fs.rmSync(testDirectory, { recursive: true, force: true });
+});
+
+test('rejects malformed delivery pincodes before creating a subscription', async () => {
+  await assert.rejects(
+    addSubscription({
+      productUrl: 'https://shop.amul.com/en/product/test-product',
+      deliveryPincode: '40057',
+      phoneNumber: '+911111111111',
+      email: 'invalid-pincode@example.com'
+    }),
+    /deliveryPincode must be a 6-digit Indian pincode/
+  );
+  assert.equal(db.prepare('SELECT count(*) count FROM products').get().count, 0);
 });
 
 test('fetches one catalog per substore and evaluates every tracked product', async () => {

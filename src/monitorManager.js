@@ -1,6 +1,13 @@
 const cron = require('node-cron');
 const db = require('./db');
-const { AmulCatalogPool, findProduct, getInventoryQuantity, getProductImageUrl, isAvailableToPurchase } = require('./amulCatalog');
+const {
+  AmulCatalogPool,
+  PincodeUnavailableError,
+  findProduct,
+  getInventoryQuantity,
+  getProductImageUrl,
+  isAvailableToPurchase
+} = require('./amulCatalog');
 const { sendNotification, verifyWhatsAppNumber } = require('./notification');
 const { track, captureException } = require('./analytics');
 const { trace, SpanStatusCode } = require('@opentelemetry/api');
@@ -11,6 +18,13 @@ const catalogPool = new AmulCatalogPool();
 const tracer = trace.getTracer('amul-stock-checker-monitor');
 let catalogTask = null;
 let checkRunning = false;
+
+class DeliveryPincodeError extends Error {
+  constructor() {
+    super('deliveryPincode must be a 6-digit Indian pincode');
+    this.name = 'DeliveryPincodeError';
+  }
+}
 
 const insertProductStmt = db.prepare(`
   INSERT INTO products (url, delivery_pincode, interval_minutes)
@@ -129,6 +143,16 @@ async function runCatalogCheck({ pool = catalogPool, notificationSender = sendNo
         if (!groups.has(substore)) groups.set(substore, { client, products: [] });
         groups.get(substore).products.push(product);
       } catch (error) {
+        if (error instanceof PincodeUnavailableError) {
+          if (!error.cached) {
+            log('warn', 'pincode_unavailable', {
+              product_id: product.id,
+              delivery_pincode: product.delivery_pincode,
+              retry_minutes: 60
+            });
+          }
+          continue;
+        }
         runStatus = 'partial_failure';
         errors.inc({ operation: 'substore_resolution' });
         recordError(error, 'substore_resolution', { product_id: product.id });
@@ -242,6 +266,8 @@ async function addSubscription({ productUrl, deliveryPincode, phoneNumber, email
   if (!productUrl || !deliveryPincode || !phoneNumber || !email) {
     throw new Error('productUrl, deliveryPincode, phoneNumber, and email are required');
   }
+  deliveryPincode = String(deliveryPincode).trim();
+  if (!/^\d{6}$/.test(deliveryPincode)) throw new DeliveryPincodeError();
   const url = new URL(productUrl);
   if (url.hostname !== 'shop.amul.com' || !url.pathname.toLowerCase().includes('/product/')) {
     throw new Error('productUrl must be an Amul product URL');
@@ -312,4 +338,11 @@ function getSubscriptionsByEmail(email) {
   return selectSubscriptionsByEmailStmt.all(email);
 }
 
-module.exports = { initExistingMonitors, runCatalogCheck, addSubscription, deleteSubscription, getSubscriptionsByEmail };
+module.exports = {
+  DeliveryPincodeError,
+  initExistingMonitors,
+  runCatalogCheck,
+  addSubscription,
+  deleteSubscription,
+  getSubscriptionsByEmail
+};

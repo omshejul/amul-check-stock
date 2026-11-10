@@ -1,11 +1,39 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  AmulCatalogPool,
+  PincodeUnavailableError,
   extractProductAlias,
   findProduct,
   getInventoryQuantity,
   isAvailableToPurchase
 } = require('../src/amulCatalog');
+
+test('caches unsupported pincodes until the retry interval expires', async () => {
+  let attempts = 0;
+  let now = 1_000;
+  const pool = new AmulCatalogPool({
+    now: () => now,
+    unavailableRetryMs: 60_000,
+    clientFactory: () => ({
+      async init(pincode) {
+        attempts += 1;
+        throw new PincodeUnavailableError(pincode);
+      }
+    })
+  });
+
+  await assert.rejects(pool.getForPincode('132013'), PincodeUnavailableError);
+  await assert.rejects(pool.getForPincode('132013'), (error) => {
+    assert.equal(error.cached, true);
+    return true;
+  });
+  assert.equal(attempts, 1);
+
+  now += 60_000;
+  await assert.rejects(pool.getForPincode('132013'), PincodeUnavailableError);
+  assert.equal(attempts, 2);
+});
 
 test('extracts and normalizes the product alias', () => {
   assert.equal(

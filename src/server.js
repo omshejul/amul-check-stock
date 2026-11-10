@@ -2,6 +2,7 @@ const express = require('express');
 const { PhoneVerificationError } = require('./notification');
 const { server: serverConfig, posthog: posthogConfig } = require('./config');
 const {
+  DeliveryPincodeError,
   initExistingMonitors,
   addSubscription,
   deleteSubscription,
@@ -139,6 +140,9 @@ app.post('/checks', authenticateApiKey, async (req, res) => {
       }
     });
   } catch (error) {
+    if (error instanceof DeliveryPincodeError) {
+      return res.status(400).json({ error: error.message });
+    }
     if (error instanceof PhoneVerificationError) {
       if (error.statusCode === 503) {
         errors.inc({ operation: 'phone_verification' });
